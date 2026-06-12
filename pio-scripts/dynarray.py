@@ -2,7 +2,6 @@
 # This is implemented as a pio post-script to ensure that we can
 # place our linker script at the correct point in the command arguments.
 Import("env")
-import shutil
 from pathlib import Path
 
 # Linker script fragment injected into the rodata output section of whichever
@@ -19,13 +18,7 @@ DYNARRAY_INJECTION = (
 def inject_before_marker(path, marker):
     """Patch a linker script file in-place, inserting DYNARRAY_INJECTION before marker."""
     original = path.read_text()
-    marker_pos = original.find(marker)
-    if marker_pos < 0:
-        raise RuntimeError(
-            f"DYNARRAY injection marker not found in linker script: path={path}, marker={marker!r}"
-        )
-    patched = original[:marker_pos] + DYNARRAY_INJECTION + original[marker_pos:]
-    path.write_text(patched)
+    path.write_text(original.replace(marker, DYNARRAY_INJECTION + marker, 1))
 
 
 if env.get("PIOPLATFORM") == "espressif32":
@@ -45,6 +38,8 @@ if env.get("PIOPLATFORM") == "espressif32":
         # leaves the ASSERTs satisfied.
         build_dir = Path(env.subst("$BUILD_DIR"))
         patched_path = build_dir / "dynarray_sections.ld"
+        import shutil
+        build_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(sections_ld_path, patched_path)
         inject_before_marker(patched_path, "_rodata_end = ABSOLUTE(.);")
 

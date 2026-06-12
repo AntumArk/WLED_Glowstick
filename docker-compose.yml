@@ -1,0 +1,37 @@
+# Build the WLED web UI (html_*.h / js_*.h headers) using Node.js in Docker.
+# Use this when Node.js is not installed locally.
+#
+# Usage:
+#   docker compose run --rm build-ui
+#
+# The generated headers land in wled00/ (mounted from the host) exactly as
+# they would from a local `npm ci && npm run build`.
+
+services:
+  build-ui:
+    image: node:20-alpine
+    working_dir: /wled
+    volumes:
+      - .:/wled
+    command: sh -c "npm ci && npm run build"
+
+  # Build firmware for a PlatformIO environment.
+  # Usage:
+  #   docker compose run --rm build-fw                          # default: esp32c3dev_drumstick
+  #   docker compose run --rm build-fw pio run -e esp32dev
+  # The platformio home dir is cached in a named volume to avoid re-downloading
+  # toolchains on every run.
+  build-fw:
+    image: python:3.12-slim
+    working_dir: /wled
+    volumes:
+      - .:/wled
+      - pio-cache:/root/.platformio
+    environment:
+      - PLATFORMIO_HOME_DIR=/root/.platformio
+    command: >
+      sh -c "pip install -q platformio &&
+             pio run -e esp32c3dev_drumstick"
+
+volumes:
+  pio-cache:
