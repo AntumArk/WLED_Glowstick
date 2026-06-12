@@ -2,6 +2,7 @@
   "name": "drumstick",
   "build": { "libArchive": false },
   "dependencies": {
-    "electroniccats/MPU6050": "1.0.1"
+    "adafruit/Adafruit BNO055": "^1.6.3",
+    "adafruit/Adafruit BusIO": "^1.16.1"
   }
 }
