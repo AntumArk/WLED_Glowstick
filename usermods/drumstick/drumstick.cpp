@@ -584,12 +584,13 @@ private:
   // GPIO0: drive HIGH in setup() to hold latch; drive LOW to release (power off).
   int8_t latchPin    = 0;
   bool   _latchPinOk = false;
+  bool _booting = true; // to ignore user button while latch was not repressed
 
   // ── User button ────────────────────────────────────────────────────────
   // GPIO1: active-LOW with INPUT_PULLUP.
   int8_t        btnPin         = 1;
   bool          _btnPinOk      = false;
-  bool          _btnWasPressed = false;
+  bool          _btnWasPressed = true;
   unsigned long _btnPressedTs  = 0;
   bool          _longFired     = false;
 
@@ -1044,6 +1045,18 @@ public:
   // ── WLED lifecycle hooks ──────────────────────────────────────────────
 
   void setup() override {
+      // ── Power latch — hold on immediately ────────────────────────────
+    if (latchPin >= 0) {
+      _latchPinOk = PinManager::allocatePin(latchPin, true, PinOwner::UM_Drumstick);
+      if (_latchPinOk) {
+        pinMode(latchPin, OUTPUT);
+        digitalWrite(latchPin, HIGH); // keep power on
+        DEBUG_PRINTF("[Drumstick] Latch pin %d HIGH (power held)\n", (int)latchPin);
+      } else {
+        DEBUG_PRINTF("[Drumstick] Latch pin %d already in use\n", (int)latchPin);
+      }
+    }
+
     DEBUG_PRINTF("[Drumstick] I2C SDA=%d SCL=%d\n", (int)i2c_sda, (int)i2c_scl);
 
     // ── WebSocket + HTTP route ────────────────────────────────────────
@@ -1068,17 +1081,7 @@ public:
       req->send_P(200, "text/html", DRUM_PAGE);
     });
 
-    // ── Power latch — hold on immediately ────────────────────────────
-    if (latchPin >= 0) {
-      _latchPinOk = PinManager::allocatePin(latchPin, true, PinOwner::UM_Drumstick);
-      if (_latchPinOk) {
-        pinMode(latchPin, OUTPUT);
-        digitalWrite(latchPin, HIGH); // keep power on
-        DEBUG_PRINTF("[Drumstick] Latch pin %d HIGH (power held)\n", (int)latchPin);
-      } else {
-        DEBUG_PRINTF("[Drumstick] Latch pin %d already in use\n", (int)latchPin);
-      }
-    }
+  
 
     // ── User button ───────────────────────────────────────────────────
     if (btnPin >= 0) {
@@ -1169,34 +1172,41 @@ public:
       lastHbeat = now;
     }
 
-    // ── Button FSM ────────────────────────────────────────────────────
-    if (_btnPinOk) {
-      const bool pressed = (digitalRead(btnPin) == LOW);
-      if (pressed) {
-        if (!_btnWasPressed) {
-          _btnPressedTs  = now;
-          _btnWasPressed = true;
-          _longFired     = false;
-        }
-        // Long press: release latch → power off (one-shot)
-        if (!_longFired && (now - _btnPressedTs >= DS_BTN_LONG_MS)) {
-          if (_latchPinOk) {
-            DEBUG_PRINTLN(F("[Drumstick] Long press: releasing power latch"));
-            digitalWrite(latchPin, LOW);
-          }
-          _longFired = true;
-        }
-      } else {
-        if (_btnWasPressed && !_longFired) {
-          // Short press: cycle LED effect
-          ++effectCurrent %= strip.getModeCount();
-          colorUpdated(CALL_MODE_BUTTON);
-          DEBUG_PRINTLN(F("[Drumstick] Short press: effect cycled"));
-        }
-        _btnWasPressed = false;
-        _longFired     = false;
-      }
-    }
+    //── Button FSM ────────────────────────────────────────────────────
+    // if (_btnPinOk) {
+    //   const bool pressed = (digitalRead(btnPin) == LOW);
+    //   if (_booting && !pressed){
+    //     _booting = false;
+        
+    //   }
+    //   else{
+    //     digitalWrite(latchPin, LOW);
+    //   }
+    //   // if (pressed) {
+    //   //   if (!_btnWasPressed) {
+    //   //     _btnPressedTs  = now;
+    //   //     _btnWasPressed = true;
+    //   //     _longFired     = false;
+    //   //   }
+    //   //   // Long press: release latch → power off (one-shot)
+    //   //   if (!_longFired && (now - _btnPressedTs >= DS_BTN_LONG_MS)) {
+    //   //     if (_latchPinOk) {
+    //   //       DEBUG_PRINTLN(F("[Drumstick] Long press: releasing power latch"));
+    //   //       digitalWrite(latchPin, LOW);
+    //   //     }
+    //   //     _longFired = true;
+    //   //   }
+    //   // } else {
+    //   //   if (_btnWasPressed && !_longFired) {
+    //   //     // Short press: cycle LED effect
+    //   //     ++effectCurrent %= strip.getModeCount();
+    //   //     colorUpdated(CALL_MODE_BUTTON);
+    //   //     DEBUG_PRINTLN(F("[Drumstick] Short press: effect cycled"));
+    //   //   }
+    //   //   _btnWasPressed = false;
+    //   //   _longFired     = false;
+    //   // }
+    // }
 
     // ── Poll sensor ───────────────────────────────────────────────────
     // IRQ-gated: read immediately on any-motion event, fall back to polling
