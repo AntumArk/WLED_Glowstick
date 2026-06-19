@@ -49,7 +49,7 @@ static constexpr uint16_t DS_HEARTBEAT_MS     = 5000;   // ms between heartbeat 
 static constexpr uint8_t  DS_UDP_BUF          = 140;    // max UDP payload bytes
 static constexpr uint16_t DS_RAW_UDP_BUF      = 200;    // raw sensor packet max bytes
 static constexpr uint16_t DS_WS_TELEM_MS      = 50;     // browser telemetry cadence (~20 Hz)
-static constexpr uint16_t DS_BTN_LONG_MS      = 1500;   // long-press threshold for power-off
+static constexpr uint16_t DS_BTN_LONG_MS      = 3500;   // long-press threshold for power-off
 
 static constexpr uint8_t  DS_BNO_ADDR         = 0x28;   // ADR pin tied to GND → address LOW
 
@@ -1173,40 +1173,33 @@ public:
     }
 
     //── Button FSM ────────────────────────────────────────────────────
-    // if (_btnPinOk) {
-    //   const bool pressed = (digitalRead(btnPin) == LOW);
-    //   if (_booting && !pressed){
-    //     _booting = false;
-        
-    //   }
-    //   else{
-    //     digitalWrite(latchPin, LOW);
-    //   }
-    //   // if (pressed) {
-    //   //   if (!_btnWasPressed) {
-    //   //     _btnPressedTs  = now;
-    //   //     _btnWasPressed = true;
-    //   //     _longFired     = false;
-    //   //   }
-    //   //   // Long press: release latch → power off (one-shot)
-    //   //   if (!_longFired && (now - _btnPressedTs >= DS_BTN_LONG_MS)) {
-    //   //     if (_latchPinOk) {
-    //   //       DEBUG_PRINTLN(F("[Drumstick] Long press: releasing power latch"));
-    //   //       digitalWrite(latchPin, LOW);
-    //   //     }
-    //   //     _longFired = true;
-    //   //   }
-    //   // } else {
-    //   //   if (_btnWasPressed && !_longFired) {
-    //   //     // Short press: cycle LED effect
-    //   //     ++effectCurrent %= strip.getModeCount();
-    //   //     colorUpdated(CALL_MODE_BUTTON);
-    //   //     DEBUG_PRINTLN(F("[Drumstick] Short press: effect cycled"));
-    //   //   }
-    //   //   _btnWasPressed = false;
-    //   //   _longFired     = false;
-    //   // }
-    // }
+    if (_btnPinOk) {
+      const bool pressed = (digitalRead(btnPin) == LOW);
+      if (pressed) {
+        if (!_btnWasPressed) {
+          _btnPressedTs  = now;
+          _btnWasPressed = true;
+          _longFired     = false;
+        }
+        // Long press: release latch → power off (one-shot)
+        if (!_longFired && (now - _btnPressedTs >= DS_BTN_LONG_MS)) {
+          if (_latchPinOk) {
+            DEBUG_PRINTLN(F("[Drumstick] Long press: releasing power latch"));
+            digitalWrite(latchPin, LOW);
+          }
+          _longFired = true;
+        }
+      } else {
+        if (_btnWasPressed && !_longFired) {
+          // Short press: cycle LED effect
+          ++effectCurrent %= strip.getModeCount();
+          colorUpdated(CALL_MODE_BUTTON);
+          DEBUG_PRINTLN(F("[Drumstick] Short press: effect cycled"));
+        }
+        _btnWasPressed = false;
+        _longFired     = false;
+      }
+    }
 
     // ── Poll sensor ───────────────────────────────────────────────────
     // IRQ-gated: read immediately on any-motion event, fall back to polling
