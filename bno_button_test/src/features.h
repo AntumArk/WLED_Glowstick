@@ -1,0 +1,2 @@
+
+#define FEATURE_MOTION_SENSOR
