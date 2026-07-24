@@ -100,3 +100,35 @@ void led_output_set_all_rgbw(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
 void led_output_set_all_rgb(uint8_t r, uint8_t g, uint8_t b) {
   led_output_set_all_rgbw(r, g, b, 0);
 }
+
+void led_output_set_mask_rgbw(uint16_t mask, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+  if (!led_ready) return;
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    const bool on = (mask & (1U << i)) != 0U;
+    led_payload[i * LED_BYTES_PER_PIXEL + 0] = on ? g : 0;
+    led_payload[i * LED_BYTES_PER_PIXEL + 1] = on ? r : 0;
+    led_payload[i * LED_BYTES_PER_PIXEL + 2] = on ? b : 0;
+    led_payload[i * LED_BYTES_PER_PIXEL + 3] = on ? w : 0;
+  }
+
+  if (rmt_transmit(led_chan, led_encoder, led_payload, sizeof(led_payload), &led_tx_config) == ESP_OK) {
+    rmt_tx_wait_all_done(led_chan, 100);
+  }
+}
+
+void led_output_set_base_rgb_with_white_mask(uint8_t r, uint8_t g, uint8_t b, uint16_t white_mask, uint8_t w) {
+  if (!led_ready) return;
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    const bool white_on = (white_mask & (1U << i)) != 0U;
+    led_payload[i * LED_BYTES_PER_PIXEL + 0] = g;
+    led_payload[i * LED_BYTES_PER_PIXEL + 1] = r;
+    led_payload[i * LED_BYTES_PER_PIXEL + 2] = b;
+    led_payload[i * LED_BYTES_PER_PIXEL + 3] = white_on ? w : 0;
+  }
+
+  if (rmt_transmit(led_chan, led_encoder, led_payload, sizeof(led_payload), &led_tx_config) == ESP_OK) {
+    rmt_tx_wait_all_done(led_chan, 100);
+  }
+}
