@@ -2,17 +2,15 @@
  * Drumstick usermod for WLED — BNO055 edition
  *
  * Detects drumming motion via BNO055 9-DOF AHRS (NDOF fusion mode) and
- * streams hit events over UDP / WebSocket. Also manages hardware power latch,
- * user button, and 1S LiPo battery monitor.
+ * streams hit events over UDP / WebSocket. Also manages user button and
+ * optional 1S LiPo battery monitor.
  *
- * Hardware (ESP32-C3 mini):
- *   BNO055 : I2C addr 0x28 (ADR=GND), SDA=GPIO6, SCL=GPIO7, INT=GPIO3
- *   Battery: 100kΩ/100kΩ voltage divider → GPIO4 (ADC), 1S LiPo 3.4–4.2 V
- *   Latch  : GPIO0 output — drive HIGH to keep power on; LOW to cut power
- *   Button : GPIO1 input (active-LOW, pull-up)
- *              short press (<1500 ms) → cycle LED effect
- *              long press  (≥1500 ms) → release power latch (power off)
- *   LED    : GPIO10 (set in WLED settings, not here)
+ * Hardware (Seeed XIAO ESP32-C6):
+ *   BNO055 : I2C addr 0x28 (ADR=GND), SDA=D4, SCL=D5, INT=GPIO3 (optional)
+ *   Battery: D1 ADC input by default (set battPin in config to override)
+ *   Button : D0 input (active-HIGH, pull-down)
+ *              short press (<3500 ms) → cycle LED effect
+ *   LED    : D10 (set in WLED settings, not here)
  *
  * BNO055 NDOF provides directly:
  *   getVector(VECTOR_LINEARACCEL)  — gravity-removed acceleration (m/s²)
@@ -49,7 +47,6 @@ static constexpr uint16_t DS_HEARTBEAT_MS     = 5000;   // ms between heartbeat 
 static constexpr uint8_t  DS_UDP_BUF          = 140;    // max UDP payload bytes
 static constexpr uint16_t DS_RAW_UDP_BUF      = 200;    // raw sensor packet max bytes
 static constexpr uint16_t DS_WS_TELEM_MS      = 50;     // browser telemetry cadence (~20 Hz)
-static constexpr uint16_t DS_BTN_LONG_MS      = 3500;   // long-press threshold for power-off
 
 static constexpr uint8_t  DS_BNO_ADDR         = 0x28;   // ADR pin tied to GND → address LOW
 
@@ -571,26 +568,20 @@ private:
   float _lastMx = 0, _lastMy = 0, _lastMz = 0;    // magnetometer, µT
 
   // ── Battery ADC ────────────────────────────────────────────────────────
-  // GPIO4: 100kΩ/100kΩ voltage divider from 1S LiPo positive terminal.
+  // D1: 100kΩ/100kΩ voltage divider from 1S LiPo positive terminal.
   // Vmeas = analogRead(battPin) * DS_ADC_VREF / DS_ADC_COUNTS * DS_BATT_DIV
   uint8_t bnoI2cAddr   = 0x28;  // 0x28 = ADR pin GND, 0x29 = ADR pin 3V3
-  int8_t  battPin      = 4;
+  int8_t  battPin      = 1;     // D1 by default
   bool    _battPinOk   = false;
   float   _battV       = 0.0f;
   uint8_t _battPct     = 0;
   bool    _battInit    = false;
 
-  // ── Power latch ────────────────────────────────────────────────────────
-  // GPIO0: drive HIGH in setup() to hold latch; drive LOW to release (power off).
-  int8_t latchPin    = 0;
-  bool   _latchPinOk = false;
-  bool _booting = true; // to ignore user button while latch was not repressed
-
   // ── User button ────────────────────────────────────────────────────────
-  // GPIO1: active-LOW with INPUT_PULLUP.
-  int8_t        btnPin         = 1;
+  // D0: active-HIGH with INPUT_PULLDOWN.
+  int8_t        btnPin         = 0;
   bool          _btnPinOk      = false;
-  bool          _btnWasPressed = true;
+  bool          _btnWasPressed = false;
   unsigned long _btnPressedTs  = 0;
   bool          _longFired     = false;
 
@@ -1045,18 +1036,6 @@ public:
   // ── WLED lifecycle hooks ──────────────────────────────────────────────
 
   void setup() override {
-      // ── Power latch — hold on immediately ────────────────────────────
-    if (latchPin >= 0) {
-      _latchPinOk = PinManager::allocatePin(latchPin, true, PinOwner::UM_Drumstick);
-      if (_latchPinOk) {
-        pinMode(latchPin, OUTPUT);
-        digitalWrite(latchPin, HIGH); // keep power on
-        DEBUG_PRINTF("[Drumstick] Latch pin %d HIGH (power held)\n", (int)latchPin);
-      } else {
-        DEBUG_PRINTF("[Drumstick] Latch pin %d already in use\n", (int)latchPin);
-      }
-    }
-
     DEBUG_PRINTF("[Drumstick] I2C SDA=%d SCL=%d\n", (int)i2c_sda, (int)i2c_scl);
 
     // ── WebSocket + HTTP route ────────────────────────────────────────
@@ -1087,8 +1066,8 @@ public:
     if (btnPin >= 0) {
       _btnPinOk = PinManager::allocatePin(btnPin, false, PinOwner::UM_Drumstick);
       if (_btnPinOk) {
-        pinMode(btnPin, INPUT_PULLUP);
-        DEBUG_PRINTF("[Drumstick] Button pin %d configured INPUT_PULLUP\n", (int)btnPin);
+        pinMode(btnPin, INPUT_PULLDOWN);
+        DEBUG_PRINTF("[Drumstick] Button pin %d configured INPUT_PULLDOWN (active-HIGH)\n", (int)btnPin);
       }
     }
 
@@ -1174,20 +1153,12 @@ public:
 
     //── Button FSM ────────────────────────────────────────────────────
     if (_btnPinOk) {
-      const bool pressed = (digitalRead(btnPin) == LOW);
+      const bool pressed = (digitalRead(btnPin) == HIGH);
       if (pressed) {
         if (!_btnWasPressed) {
           _btnPressedTs  = now;
           _btnWasPressed = true;
           _longFired     = false;
-        }
-        // Long press: release latch → power off (one-shot)
-        if (!_longFired && (now - _btnPressedTs >= DS_BTN_LONG_MS)) {
-          if (_latchPinOk) {
-            DEBUG_PRINTLN(F("[Drumstick] Long press: releasing power latch"));
-            digitalWrite(latchPin, LOW);
-          }
-          _longFired = true;
         }
       } else {
         if (_btnWasPressed && !_longFired) {
@@ -1214,7 +1185,7 @@ public:
     if (!sensorOk) return;
 
     // Clear BNO055 INT_STA register (page 0, 0x37) so the INT pin de-asserts.
-    // The register auto-latches on motion and must be read to release the line.
+    // The register clears on read, so polling keeps the sensor line settled.
     clearBnoInterrupt();
 
     // Read linear acceleration (gravity removed by BNO055 fusion), gyro, quat, cal
@@ -1407,7 +1378,6 @@ public:
     top["cooldown"]      = cooldown_ms;
     top["bnoAddr"]       = bnoI2cAddr;
     top["irqPin"]        = irqPin;
-    top["latchPin"]      = latchPin;
     top["btnPin"]        = btnPin;
     top["battPin"]       = battPin;
     top["zone"]          = activeZone;
@@ -1433,9 +1403,8 @@ public:
     // Sanitise: only accept 0x28 or 0x29
     if (bnoI2cAddr != 0x28 && bnoI2cAddr != 0x29) bnoI2cAddr = 0x28;
     ok &= getJsonValue(top["irqPin"],        irqPin,        (int8_t)3);
-    ok &= getJsonValue(top["latchPin"],      latchPin,      (int8_t)0);
-    ok &= getJsonValue(top["btnPin"],        btnPin,        (int8_t)1);
-    ok &= getJsonValue(top["battPin"],       battPin,       (int8_t)4);
+    ok &= getJsonValue(top["btnPin"],        btnPin,        (int8_t)0);
+    ok &= getJsonValue(top["battPin"],       battPin,       (int8_t)1);
     ok &= getJsonValue(top["zone"],          activeZone,    (uint8_t)0);
     ok &= getJsonValue(top["autoZone"],      autoZone,      true);
     ok &= getJsonValue(top["velCurve"],      velocityCurve, (uint8_t)0);
@@ -1493,9 +1462,8 @@ public:
     oappend(F("addOption(dd,'0x29 (ADR=3V3)',41);"));   // 0x29 = 41 decimal
     oappend(F("addInfo('Drumstick:bnoAddr',1,'BNO055 I2C address; 0x28 when ADR pin is GND, 0x29 when ADR pin is 3V3. Wrong address is auto-probed on boot.');"));
     oappend(F("addInfo('Drumstick:irqPin',1,'BNO055 INT pin (GPIO3); gyro any-motion IRQ fires when angular rate exceeds ~10 dps, triggering immediate sensor read; -1 to disable and use polling only');"));
-    oappend(F("addInfo('Drumstick:latchPin',1,'power latch output pin; driven HIGH on boot to hold power');"));
-    oappend(F("addInfo('Drumstick:btnPin',1,'user button input pin (active-LOW); short=effect cycle, long=power off');"));
-    oappend(F("addInfo('Drumstick:battPin',1,'battery ADC pin; 100k/100k voltage divider from 1S LiPo');"));
+    oappend(F("addInfo('Drumstick:btnPin',1,'user button input pin (XIAO default D0, active-HIGH with pull-down); short=effect cycle');"));
+    oappend(F("addInfo('Drumstick:battPin',1,'battery ADC pin; default D1 on XIAO ESP32-C6');"));
     oappend(F("addInfo('Drumstick:udpHost',1,'hit event receiver IP or hostname');"));
     oappend(F("addInfo('Drumstick:udpPort',1,'hit event receiver UDP port; default 9000');"));
     oappend(F("addInfo('Drumstick:autoZone',1,'auto matches peak linear-accel world vector to nearest taught zone aim (BNO055 ENU quaternion required, sys cal >= 1)');"));
