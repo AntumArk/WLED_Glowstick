@@ -5,6 +5,8 @@
 #include "freertos/task.h"
 
 
+TaskHandle_t bno_task_handle = NULL;
+
 static uint8_t bno_addr = BNO_ADDR_PRIMARY;
 static i2c_master_bus_handle_t i2c_bus = NULL;
 static i2c_master_dev_handle_t bno_dev = NULL;
@@ -174,6 +176,16 @@ void init_i2c(void) {
   ESP_LOGI(TAG, "I2C initialized SDA=%d SCL=%d", I2C_SDA_GPIO, I2C_SCL_GPIO);
 }
 
+void bno_task(void *arg) {
+  ESP_LOGI(TAG, "BNO task started");
+  while (1) {
+
+    print_bno_status();
+    bno_ready = true;
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
 bool init_bno(void) {
   
     init_i2c();
@@ -182,8 +194,13 @@ bool init_bno(void) {
     i2c_master_bus_rm_device(bno_dev);
     bno_dev = NULL;
   }
-  if (try_init_bno_on_addr(BNO_ADDR_PRIMARY)) return true;
-  if (try_init_bno_on_addr(BNO_ADDR_SECONDARY)) return true;
-  return false;
+  bool initGood = try_init_bno_on_addr(BNO_ADDR_PRIMARY);
+  if (!initGood) {
+    initGood = try_init_bno_on_addr(BNO_ADDR_SECONDARY);
+  }
+
+  xTaskCreatePinnedToCore(bno_task, "bno_task", 4096, NULL, 5, &bno_task_handle, tskNO_AFFINITY);
+  return initGood;
 }
+
 

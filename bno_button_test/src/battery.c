@@ -14,6 +14,7 @@ adc_cali_handle_t adc_cali = NULL;
 bool adc_cali_enabled = false;
 uint32_t last_battery_ms = 0;
 
+TaskHandle_t battery_task_handle = NULL;
 
 
 float clampf(float value, float lo, float hi) {
@@ -92,11 +93,17 @@ void print_battery_status(void) {
   ESP_LOGI(TAG, "BATT: %.3fV (%.0f%%) raw=%d", battery_v, percent, raw_avg);
 }
 
-void start_battery_task(void) {
-    init_battery_adc();
-
+void battery_task(void *arg) {
   while (1) {
     print_battery_status();
     vTaskDelay(pdMS_TO_TICKS(10000));
   }
 }
+
+void start_battery_task(void) {
+    init_battery_adc();
+
+    xTaskCreatePinnedToCore(battery_task, "battery_task", 2048, NULL, 1, &battery_task_handle, tskNO_AFFINITY);
+    
+}
+
