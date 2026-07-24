@@ -81,18 +81,22 @@ bool led_output_ready(void) {
   return led_ready;
 }
 
-void led_output_set_all_rgb(uint8_t r, uint8_t g, uint8_t b) {
+void led_output_set_all_rgbw(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   if (!led_ready) return;
 
-  // SK6812 RGBW strips usually use GRBW order. Keep white channel at 0.
+  // SK6812 RGBW strips usually use GRBW order.
   for (int i = 0; i < LED_COUNT; i++) {
     led_payload[i * LED_BYTES_PER_PIXEL + 0] = g;
     led_payload[i * LED_BYTES_PER_PIXEL + 1] = r;
     led_payload[i * LED_BYTES_PER_PIXEL + 2] = b;
-    led_payload[i * LED_BYTES_PER_PIXEL + 3] = 0;
+    led_payload[i * LED_BYTES_PER_PIXEL + 3] = w;
   }
 
   if (rmt_transmit(led_chan, led_encoder, led_payload, sizeof(led_payload), &led_tx_config) == ESP_OK) {
     rmt_tx_wait_all_done(led_chan, 100);
   }
+}
+
+void led_output_set_all_rgb(uint8_t r, uint8_t g, uint8_t b) {
+  led_output_set_all_rgbw(r, g, b, 0);
 }

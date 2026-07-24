@@ -21,6 +21,7 @@ typedef struct {
 	uint8_t r;
 	uint8_t g;
 	uint8_t b;
+	uint8_t w;
 	const char *name;
 } glow_color_t;
 
@@ -28,11 +29,11 @@ static const char *TAG = "bno_button_test";
 TaskHandle_t glowstick_task_handle = NULL;
 
 static const glow_color_t glow_colors[] = {
-	{0, 255, 0, "GREEN"},
-	{180, 0, 255, "PURPLE"},
-	{140, 255, 0, "LIME"},
-	{255, 0, 0, "RED"},
-	{255, 255, 255, "WHITE"},
+	{0, 255, 0, 0, "GREEN"},
+	{180, 0, 255, 0, "PURPLE"},
+	{140, 255, 0, 0, "LIME"},
+	{255, 0, 0, 0, "RED"},
+	{0, 0, 0, 255, "WHITE"},
 };
 static volatile uint8_t glow_color_index = 0;
 static portMUX_TYPE glow_state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -111,7 +112,8 @@ static void render_charge(void) {
 	const uint8_t r = (uint8_t)((float)c.r * brightness);
 	const uint8_t g = (uint8_t)((float)c.g * brightness);
 	const uint8_t b = (uint8_t)((float)c.b * brightness);
-	led_output_set_all_rgb(r, g, b);
+	const uint8_t w = (uint8_t)((float)c.w * brightness);
+	led_output_set_all_rgbw(r, g, b, w);
 }
 
 static void handle_button_events(void) {
