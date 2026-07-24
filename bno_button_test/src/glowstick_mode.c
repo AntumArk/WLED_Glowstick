@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "driver/gpio.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 
 #include "esp_log.h"
@@ -16,6 +18,7 @@
 #define LOW_FREQ_ENVELOPE_TAU_MS 350.0f
 #define SWING_MAG_SATURATION 0.012f
 #define MAX_CHARGE_STEP_PER_UPDATE 0.010f
+#define BUTTON_WAKE_GPIO GPIO_NUM_0
 
 typedef struct {
 	uint8_t r;
@@ -50,6 +53,28 @@ static float charge = 1.0f;
 static float low_freq_envelope = 0.0f;
 static uint32_t last_bno_retry_ms = 0;
 static uint32_t last_bno_sample_ms = 0;
+
+static void render_charge(void);
+
+static void blink_sleep_ready(void) {
+	for (int i = 0; i < 2; i++) {
+		led_output_set_all_rgbw(0, 0, 0, 255);
+		vTaskDelay(pdMS_TO_TICKS(80));
+		led_output_set_all_rgbw(0, 0, 0, 0);
+		vTaskDelay(pdMS_TO_TICKS(70));
+	}
+	render_charge();
+}
+
+static void enter_deep_sleep(void) {
+	ESP_LOGI(TAG, "Long press detected -> entering deep sleep. Press button to wake.");
+	led_output_set_all_rgbw(0, 0, 0, 0);
+
+	ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+	ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(1ULL << BUTTON_WAKE_GPIO, ESP_EXT1_WAKEUP_ANY_HIGH));
+	vTaskDelay(pdMS_TO_TICKS(100));
+	esp_deep_sleep_start();
+}
 
 static float clamp01(float x) {
 	if (x < 0.0f) return 0.0f;
@@ -122,9 +147,10 @@ static void handle_button_events(void) {
 		if (event.type == BUTTON_EVENT_SHORT_PRESS) {
 			glowstick_mode_next_color();
 			glowstick_mode_charge_full();
-		} else if (event.type == BUTTON_EVENT_LONG_PRESS) {
-			// Deep sleep intentionally disabled for now.
-			ESP_LOGI(TAG, "Long press received (sleep disabled)");
+		} else if (event.type == BUTTON_EVENT_LONG_PRESS_READY) {
+			blink_sleep_ready();
+		} else if (event.type == BUTTON_EVENT_LONG_PRESS_RELEASE) {
+			enter_deep_sleep();
 		}
 	}
 }

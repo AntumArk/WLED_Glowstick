@@ -11,7 +11,7 @@
 #include "freertos/task.h"
 
 #define BUTTON_GPIO GPIO_NUM_0
-#define BUTTON_LONG_PRESS_MS 2000
+#define BUTTON_LONG_PRESS_MS 3000
 #define BUTTON_DEBOUNCE_MS 30
 
 static const char *TAG = "button";
@@ -19,7 +19,7 @@ static const char *TAG = "button";
 static int stable_button = 1;
 static int idle_button_level = 1;
 static uint32_t button_press_start_ms = 0;
-static bool button_long_press_fired = false;
+static bool button_long_press_armed = false;
 static QueueHandle_t button_edge_queue = NULL;
 static QueueHandle_t button_action_queue = NULL;
 
@@ -47,7 +47,7 @@ static void init_button(void) {
   stable_button = gpio_get_level(BUTTON_GPIO);
   idle_button_level = stable_button;
   button_press_start_ms = 0;
-  button_long_press_fired = false;
+  button_long_press_armed = false;
   ESP_LOGI(TAG, "Button initialized on GPIO %d (idle level=%d)", BUTTON_GPIO, idle_button_level);
 }
 
@@ -95,25 +95,26 @@ static void button_task(void *arg) {
 
         if (pressed) {
           button_press_start_ms = now;
-          button_long_press_fired = false;
+          button_long_press_armed = false;
         } else {
-          if (!button_long_press_fired && button_press_start_ms != 0 &&
+          if (button_long_press_armed) {
+            publish_button_event(BUTTON_EVENT_LONG_PRESS_RELEASE, now);
+          } else if (button_press_start_ms != 0 &&
               (now - button_press_start_ms) < BUTTON_LONG_PRESS_MS) {
             publish_button_event(BUTTON_EVENT_SHORT_PRESS, now);
           }
           button_press_start_ms = 0;
-          button_long_press_fired = false;
+          button_long_press_armed = false;
         }
       }
     }
 
     const bool still_pressed = (stable_button != idle_button_level);
-    if (still_pressed && !button_long_press_fired && button_press_start_ms != 0 &&
+    if (still_pressed && !button_long_press_armed && button_press_start_ms != 0 &&
         (now - button_press_start_ms) >= BUTTON_LONG_PRESS_MS) {
-      button_long_press_fired = true;
-      publish_button_event(BUTTON_EVENT_LONG_PRESS, now);
-      // Deep sleep intentionally disabled for now.
-      ESP_LOGI(TAG, "Long press event published (sleep disabled)");
+      button_long_press_armed = true;
+      publish_button_event(BUTTON_EVENT_LONG_PRESS_READY, now);
+      ESP_LOGI(TAG, "Long press armed: release to sleep");
     }
   }
 }
