@@ -5,7 +5,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "driver/gpio.h"
-#include "esp_random.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 
@@ -16,17 +15,10 @@
 #define GLOW_GREEN_MAX 255U
 #define SWING_AVG_WINDOW 48
 #define CHARGE_TIME_MS 1200
-#define QUAT_ENVELOPE_TAU_MS 350.0f
-#define LINACC_ENVELOPE_TAU_MS 250.0f
-#define SWING_MAG_SATURATION 0.95f
+#define LOW_FREQ_ENVELOPE_TAU_MS 350.0f
+#define SWING_MAG_SATURATION 0.012f
 #define MAX_CHARGE_STEP_PER_UPDATE 0.010f
 #define BUTTON_WAKE_GPIO GPIO_NUM_0
-#define OVERCHARGE_TRIGGER_MS 10000U
-#define OVERCHARGE_INTENSE_THRESHOLD 0.70f
-#define OVERCHARGE_STOP_THRESHOLD 0.25f
-#define OVERCHARGE_STOP_HYSTERESIS_MS 600U
-#define OVERCHARGE_STROBE_PERIOD_MS 200U
-#define OVERCHARGE_STROBE_ON_MS 30U
 
 typedef struct {
 	uint8_t r;
@@ -58,15 +50,9 @@ static float prev_quat[4] = {0.0f};
 static bool prev_quat_valid = false;
 static uint32_t last_mode_update_ms = 0;
 static float charge = 1.0f;
-static float quat_envelope = 0.0f;
-static float linacc_envelope = 0.0f;
+static float low_freq_envelope = 0.0f;
 static uint32_t last_bno_retry_ms = 0;
 static uint32_t last_bno_sample_ms = 0;
-static uint32_t sustained_shake_ms = 0;
-static uint32_t calm_ms = 0;
-static bool overcharge_active = false;
-static uint32_t last_overcharge_blink_ms = 0;
-static uint16_t overcharge_mask = 0;
 
 static void render_charge(void);
 
@@ -116,49 +102,6 @@ static bool get_current_quat(float q[4]) {
 	q[2] /= norm;
 	q[3] /= norm;
 	return true;
-}
-
-static float get_current_linacc_mag(void) {
-	if (!bno_ready) return 0.0f;
-	const float x = (float)last_bno_teleplot.linacc[0] / 100.0f;
-	const float y = (float)last_bno_teleplot.linacc[1] / 100.0f;
-	const float z = (float)last_bno_teleplot.linacc[2] / 100.0f;
-	return sqrtf((x * x) + (y * y) + (z * z));
-}
-
-static void render_overcharge(uint32_t now) {
-	const uint32_t elapsed = now - last_overcharge_blink_ms;
-	if (elapsed >= OVERCHARGE_STROBE_PERIOD_MS) {
-		last_overcharge_blink_ms = now;
-		overcharge_mask = 0;
-		for (int i = 0; i < 9; i++) {
-			if ((esp_random() & 0x1U) != 0U) {
-				overcharge_mask |= (uint16_t)(1U << i);
-			}
-		}
-		if (overcharge_mask == 0U) {
-			overcharge_mask = (uint16_t)(1U << (esp_random() % 9U));
-		}
-	}
-
-	if ((now - last_overcharge_blink_ms) <= OVERCHARGE_STROBE_ON_MS) {
-		uint8_t color_index_snapshot = 0;
-		float charge_snapshot = 0.0f;
-		taskENTER_CRITICAL(&glow_state_lock);
-		color_index_snapshot = glow_color_index;
-		charge_snapshot = charge;
-		taskEXIT_CRITICAL(&glow_state_lock);
-
-		const glow_color_t c = glow_colors[color_index_snapshot % (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]))];
-		const float brightness = clamp01(charge_snapshot);
-		const uint8_t r = (uint8_t)((float)c.r * brightness);
-		const uint8_t g = (uint8_t)((float)c.g * brightness);
-		const uint8_t b = (uint8_t)((float)c.b * brightness);
-		const uint8_t w = (uint8_t)(120.0f * brightness);
-		led_output_set_base_rgb_with_white_mask(r, g, b, overcharge_mask, w);
-	} else {
-		render_charge();
-	}
 }
 
 static void push_swing_sample(float sample) {
@@ -268,17 +211,10 @@ void glowstick_task() {
 		prev_quat_valid = false;
 	}
 
-	// Blend orientation swing with linear acceleration so only stronger shaking charges.
-	const float quat_alpha = (float)dt_ms / (QUAT_ENVELOPE_TAU_MS + (float)dt_ms);
-	quat_envelope += quat_alpha * (frame_swing_mag - quat_envelope);
-	const float linacc_mag = get_current_linacc_mag();
-	const float linacc_alpha = (float)dt_ms / (LINACC_ENVELOPE_TAU_MS + (float)dt_ms);
-	linacc_envelope += linacc_alpha * (linacc_mag - linacc_envelope);
-
-	const float quat_norm = clamp01((quat_envelope - 0.008f) / (0.060f - 0.008f));
-	const float linacc_norm = clamp01((linacc_envelope - 0.40f) / (4.00f - 0.40f));
-	const float shake_intensity = clamp01((quat_norm * 0.55f) + (linacc_norm * 0.45f));
-	push_swing_sample(shake_intensity);
+	// Low-frequency envelope: suppress frame spikes and keep sustained swinging.
+	const float alpha = (float)dt_ms / (LOW_FREQ_ENVELOPE_TAU_MS + (float)dt_ms);
+	low_freq_envelope += alpha * (frame_swing_mag - low_freq_envelope);
+	push_swing_sample(low_freq_envelope);
 
 	// Always decay toward off when idle, then add charge from sustained swing.
 	taskENTER_CRITICAL(&glow_state_lock);
@@ -296,33 +232,7 @@ void glowstick_task() {
 
 	charge = clamp01(charge);
 	taskEXIT_CRITICAL(&glow_state_lock);
-
-	if (swing_avg >= OVERCHARGE_INTENSE_THRESHOLD) {
-		sustained_shake_ms += dt_ms;
-		calm_ms = 0;
-		if (sustained_shake_ms >= OVERCHARGE_TRIGGER_MS) {
-			overcharge_active = true;
-		}
-	} else {
-		sustained_shake_ms = 0;
-		if (overcharge_active) {
-			if (swing_avg <= OVERCHARGE_STOP_THRESHOLD) {
-				calm_ms += dt_ms;
-				if (calm_ms >= OVERCHARGE_STOP_HYSTERESIS_MS) {
-					overcharge_active = false;
-					calm_ms = 0;
-				}
-			} else {
-				calm_ms = 0;
-			}
-		}
-	}
-
-	if (overcharge_active) {
-		render_overcharge(now);
-	} else {
-		render_charge();
-	}
+	render_charge();
     vTaskDelay(pdMS_TO_TICKS(10));
 }
 }
@@ -335,13 +245,7 @@ void glowstick_mode_init(void) {
 	last_mode_update_ms = 0;
 	last_bno_retry_ms = 0;
 	last_bno_sample_ms = 0;
-	quat_envelope = 0.0f;
-	linacc_envelope = 0.0f;
-	sustained_shake_ms = 0;
-	calm_ms = 0;
-	overcharge_active = false;
-	last_overcharge_blink_ms = 0;
-	overcharge_mask = 0;
+	low_freq_envelope = 0.0f;
 	charge = 1.0f;
 	glow_color_index = 0;
 	led_output_init();
