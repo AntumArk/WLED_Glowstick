@@ -3,7 +3,7 @@
 #include "bno.h"
 
 
-#define TIME_TO_FADE_MS 5000
+#define TIME_TO_FADE_MS 30000
 #define SHAKE_POWER_THRESHOLD 0.0015f
 
 void glowstick_mode_init(void);

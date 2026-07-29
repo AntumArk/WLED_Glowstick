@@ -10,6 +10,7 @@ TaskHandle_t bno_task_handle = NULL;
 static uint8_t bno_addr = BNO_ADDR_PRIMARY;
 static i2c_master_bus_handle_t i2c_bus = NULL;
 static i2c_master_dev_handle_t bno_dev = NULL;
+static volatile bool bno_sleeping = false;
 
 uint32_t last_bno_ms = 0;
 bool bno_ready = false;
@@ -74,7 +75,7 @@ void emit_bno_teleplot(const uint8_t *linacc, const uint8_t *gyro, const uint8_t
 }
 
 
-void print_bno_status(void) {
+bool print_bno_status(void) {
   uint8_t calib = 0;
   uint8_t linacc[6] = {0};
   uint8_t gyro[6] = {0};
@@ -86,7 +87,7 @@ void print_bno_status(void) {
       i2c_read_reg(BNO_REG_QUATERNION_DATA, quat, sizeof(quat)) != ESP_OK) {
     ESP_LOGW(TAG, "BNO055 read failed at 0x%02X", bno_addr);
     bno_ready = false;
-    return;
+    return false;
   }
 
    last_bno_teleplot.linacc[0] = read_i16_le(&linacc[0]);
@@ -101,6 +102,78 @@ void print_bno_status(void) {
     last_bno_teleplot.quat[3] = read_i16_le(&quat[6]);
 
   emit_bno_teleplot(linacc, gyro, quat, calib);
+  return true;
+}
+
+void bno_set_sleeping(bool sleeping) {
+  bno_sleeping = sleeping;
+}
+
+bool bno_suspend(void) {
+  if (bno_dev == NULL) return false;
+
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_CONFIG) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to switch BNO055 to config mode before suspend");
+    return false;
+  }
+  vTaskDelay(pdMS_TO_TICKS(30));
+
+  if (i2c_write_reg(BNO_REG_PWR_MODE, BNO_MODE_SUSPEND) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to put BNO055 into suspend mode");
+    return false;
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(20));
+  return true;
+}
+
+bool bno_resume(void) {
+  if (bno_dev == NULL) return false;
+
+  if (i2c_write_reg(BNO_REG_PWR_MODE, BNO_PWR_MODE_NORMAL) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to restore BNO055 normal power mode");
+    return false;
+  }
+  vTaskDelay(pdMS_TO_TICKS(30));
+
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_CONFIG) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to switch BNO055 to config mode");
+    return false;
+  }
+  vTaskDelay(pdMS_TO_TICKS(30));
+
+#if BNO_USE_EXTERNAL_CRYSTAL
+  if (i2c_write_reg(BNO_REG_SYS_TRIGGER, BNO_SYS_TRIGGER_CLK_SEL) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to select external BNO055 clock source");
+    return false;
+  }
+
+  for (int retry = 0; retry < 10; retry++) {
+    uint8_t clk_status = 0;
+    if (i2c_read_reg(BNO_REG_SYS_CLK_STATUS, &clk_status, 1) != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to read BNO055 clock status");
+      return false;
+    }
+
+    if ((clk_status & 0x01U) == 0U) {
+      break;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+#endif
+
+  if (i2c_write_reg(BNO_REG_PAGE_ID, 0x00) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to select BNO055 page 0");
+    return false;
+  }
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_NDOF) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to restore BNO055 NDOF mode");
+    return false;
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(20));
+  return true;
 }
 
 bool try_init_bno_on_addr(uint8_t addr) {
@@ -140,29 +213,21 @@ bool try_init_bno_on_addr(uint8_t addr) {
     return false;
   }
 
-  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_CONFIG) != ESP_OK) {
+  if (!bno_resume()) {
     i2c_master_bus_rm_device(bno_dev);
     bno_dev = NULL;
     return false;
   }
-  vTaskDelay(pdMS_TO_TICKS(30));
-  if (i2c_write_reg(BNO_REG_PAGE_ID, 0x00) != ESP_OK) {
-    i2c_master_bus_rm_device(bno_dev);
-    bno_dev = NULL;
-    return false;
-  }
-  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_NDOF) != ESP_OK) {
-    i2c_master_bus_rm_device(bno_dev);
-    bno_dev = NULL;
-    return false;
-  }
-  vTaskDelay(pdMS_TO_TICKS(20));
 
   ESP_LOGI(TAG, "BNO055 ready at 0x%02X", bno_addr);
   return true;
 }
 
 void init_i2c(void) {
+  if (i2c_bus != NULL) {
+    return;
+  }
+
   const i2c_master_bus_config_t config = {
       .clk_source = I2C_CLK_SRC_DEFAULT,
       .i2c_port = I2C_NUM_0,
@@ -179,16 +244,19 @@ void init_i2c(void) {
 void bno_task(void *arg) {
   ESP_LOGI(TAG, "BNO task started");
   while (1) {
+    if (bno_sleeping) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
 
-    print_bno_status();
-    bno_ready = true;
-    vTaskDelay(pdMS_TO_TICKS(50));
+    bno_ready = print_bno_status();
+    vTaskDelay(pdMS_TO_TICKS(BNO_SAMPLE_PERIOD_MS));
   }
 }
 
 bool init_bno(void) {
-  
-    init_i2c();
+  bno_set_sleeping(false);
+  init_i2c();
 
   if (bno_dev != NULL) {
     i2c_master_bus_rm_device(bno_dev);
@@ -199,7 +267,9 @@ bool init_bno(void) {
     initGood = try_init_bno_on_addr(BNO_ADDR_SECONDARY);
   }
 
-  xTaskCreatePinnedToCore(bno_task, "bno_task", 4096, NULL, 5, &bno_task_handle, tskNO_AFFINITY);
+  if (bno_task_handle == NULL) {
+    xTaskCreatePinnedToCore(bno_task, "bno_task", 4096, NULL, 5, &bno_task_handle, tskNO_AFFINITY);
+  }
   return initGood;
 }
 

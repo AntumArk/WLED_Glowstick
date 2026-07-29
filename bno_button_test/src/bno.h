@@ -11,7 +11,10 @@
 #define BNO_ADDR_SECONDARY 0x28
 
 #define BNO_REG_CHIP_ID 0x00
+#define BNO_REG_SYS_CLK_STATUS 0x38
 #define BNO_REG_OPR_MODE 0x3D
+#define BNO_REG_PWR_MODE 0x3E
+#define BNO_REG_SYS_TRIGGER 0x3F
 #define BNO_REG_PAGE_ID 0x07
 #define BNO_REG_CALIB_STAT 0x35
 #define BNO_REG_LINACC_DATA 0x28
@@ -19,15 +22,23 @@
 #define BNO_REG_QUATERNION_DATA 0x20
 
 #define BNO_MODE_CONFIG 0x00
+#define BNO_PWR_MODE_NORMAL 0x00
+#define BNO_PWR_MODE_LOW 0x01
+#define BNO_MODE_SUSPEND 0x02
 #define BNO_MODE_NDOF 0x0C
+#define BNO_SYS_TRIGGER_CLK_SEL 0x80
+#define BNO_USE_EXTERNAL_CRYSTAL 1
 #define BNO_SAMPLE_PERIOD_MS 10
 
 
 extern uint32_t last_bno_ms;
 extern bool bno_ready;
 
-void print_bno_status(void);
+bool print_bno_status(void);
 bool init_bno(void);
+void bno_set_sleeping(bool sleeping);
+bool bno_suspend(void);
+bool bno_resume(void);
 
 typedef struct bno_readings_t {
   int16_t linacc[3];

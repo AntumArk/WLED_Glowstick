@@ -51,8 +51,6 @@ static bool prev_quat_valid = false;
 static uint32_t last_mode_update_ms = 0;
 static float charge = 1.0f;
 static float low_freq_envelope = 0.0f;
-static uint32_t last_bno_retry_ms = 0;
-static uint32_t last_bno_sample_ms = 0;
 
 static void render_charge(void);
 
@@ -68,11 +66,14 @@ static void blink_sleep_ready(void) {
 
 static void enter_deep_sleep(void) {
 	ESP_LOGI(TAG, "Long press detected -> entering deep sleep. Press button to wake.");
+	bno_set_sleeping(true);
+	if (bno_ready) {
+		(void)bno_suspend();
+	}
 	led_output_set_all_rgbw(0, 0, 0, 0);
 
 	ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
 	ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(1ULL << BUTTON_WAKE_GPIO, ESP_EXT1_WAKEUP_ANY_HIGH));
-	vTaskDelay(pdMS_TO_TICKS(100));
 	esp_deep_sleep_start();
 }
 
@@ -161,20 +162,6 @@ void glowstick_task() {
     while (1) {
 	handle_button_events();
 
-	if (!bno_ready) {
-		const uint32_t now_retry = now_ms();
-		if (last_bno_retry_ms == 0 || (now_retry - last_bno_retry_ms) > 200) {
-			last_bno_retry_ms = now_retry;
-			bno_ready = init_bno();
-		}
-	} else {
-		const uint32_t now_sample = now_ms();
-		if ((now_sample - last_bno_sample_ms) >= BNO_SAMPLE_PERIOD_MS) {
-			last_bno_sample_ms = now_sample;
-			print_bno_status();
-		}
-	}
-
     const uint32_t now = now_ms();
 	if (last_mode_update_ms == 0U) {
 		last_mode_update_ms = now;
@@ -243,12 +230,11 @@ void glowstick_mode_init(void) {
 	swing_hist_sum = 0.0f;
 	prev_quat_valid = false;
 	last_mode_update_ms = 0;
-	last_bno_retry_ms = 0;
-	last_bno_sample_ms = 0;
 	low_freq_envelope = 0.0f;
 	charge = 1.0f;
 	glow_color_index = 0;
 	led_output_init();
+	bno_ready = init_bno();
 	render_charge();
 	ESP_LOGI(TAG, "LED mode: GLOWSTICK (%s)", glow_colors[glow_color_index].name);
 
