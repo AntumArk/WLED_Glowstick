@@ -5,6 +5,7 @@
 #include "esp_log.h"
 
 #define LED_GPIO GPIO_NUM_18
+#define LED_COUNT 9
 #define LED_BYTES_PER_PIXEL 4
 
 static const char *TAG = "bno_button_test";
@@ -12,7 +13,7 @@ static const char *TAG = "bno_button_test";
 static rmt_channel_handle_t led_chan = NULL;
 static rmt_encoder_handle_t led_encoder = NULL;
 static bool led_ready = false;
-static uint8_t led_payload[LED_OUTPUT_COUNT * LED_BYTES_PER_PIXEL] = {0};
+static uint8_t led_payload[LED_COUNT * LED_BYTES_PER_PIXEL] = {0};
 
 static const rmt_transmit_config_t led_tx_config = {
     .loop_count = 0,
@@ -72,7 +73,7 @@ bool led_output_init(void) {
   }
 
   led_ready = true;
-  ESP_LOGI(TAG, "SK6812 output initialized on GPIO %d (%d LEDs)", LED_GPIO, LED_OUTPUT_COUNT);
+  ESP_LOGI(TAG, "SK6812 output initialized on GPIO %d (%d LEDs)", LED_GPIO, LED_COUNT);
   return true;
 }
 
@@ -80,31 +81,20 @@ bool led_output_ready(void) {
   return led_ready;
 }
 
-void led_output_set_pixel_rgbw(uint8_t pixel, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-  if (!led_ready || pixel >= LED_OUTPUT_COUNT) return;
+void led_output_set_all_rgbw(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+  if (!led_ready) return;
 
   // SK6812 RGBW strips usually use GRBW order.
-  led_payload[pixel * LED_BYTES_PER_PIXEL + 0] = g;
-  led_payload[pixel * LED_BYTES_PER_PIXEL + 1] = r;
-  led_payload[pixel * LED_BYTES_PER_PIXEL + 2] = b;
-  led_payload[pixel * LED_BYTES_PER_PIXEL + 3] = w;
-}
-
-void led_output_show(void) {
-  if (!led_ready) return;
+  for (int i = 0; i < LED_COUNT; i++) {
+    led_payload[i * LED_BYTES_PER_PIXEL + 0] = g;
+    led_payload[i * LED_BYTES_PER_PIXEL + 1] = r;
+    led_payload[i * LED_BYTES_PER_PIXEL + 2] = b;
+    led_payload[i * LED_BYTES_PER_PIXEL + 3] = w;
+  }
 
   if (rmt_transmit(led_chan, led_encoder, led_payload, sizeof(led_payload), &led_tx_config) == ESP_OK) {
     rmt_tx_wait_all_done(led_chan, 100);
   }
-}
-
-void led_output_set_all_rgbw(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-  if (!led_ready) return;
-
-  for (uint8_t pixel = 0; pixel < LED_OUTPUT_COUNT; pixel++) {
-    led_output_set_pixel_rgbw(pixel, r, g, b, w);
-  }
-  led_output_show();
 }
 
 void led_output_set_all_rgb(uint8_t r, uint8_t g, uint8_t b) {

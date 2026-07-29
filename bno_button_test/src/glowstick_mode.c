@@ -19,7 +19,6 @@
 #define SWING_MAG_SATURATION 0.012f
 #define MAX_CHARGE_STEP_PER_UPDATE 0.010f
 #define BUTTON_WAKE_GPIO GPIO_NUM_0
-#define RGB_WAVE_PERIOD_MS 8000U
 
 typedef struct {
 	uint8_t r;
@@ -38,12 +37,6 @@ static const glow_color_t glow_colors[] = {
 	{140, 255, 0, 0, "LIME"},
 	{255, 0, 0, 0, "RED"},
 	{0, 0, 0, 255, "WHITE"},
-	{255, 255, 255, 255, "BLAST"},
-	{0, 0, 255, 0, "BLUE"},
-	{255, 255, 0, 0, "YELLOW"},
-	{255, 128, 0, 0, "ORANGE"},
-	{255, 0, 255, 0, "MAGENTA"},
-	{0, 255, 255, 0, "CYAN"},
 };
 static volatile uint8_t glow_color_index = 0;
 static portMUX_TYPE glow_state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -60,7 +53,6 @@ static float charge = 1.0f;
 static float low_freq_envelope = 0.0f;
 
 static void render_charge(void);
-static void render_rgb_wave(float brightness);
 
 static void blink_sleep_ready(void) {
 	for (int i = 0; i < 2; i++) {
@@ -141,50 +133,13 @@ static void render_charge(void) {
 	charge_snapshot = charge;
 	taskEXIT_CRITICAL(&glow_state_lock);
 
+	const glow_color_t c = glow_colors[color_index_snapshot % (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]))];
 	const float brightness = clamp01(charge_snapshot);
-	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
-	if (color_index_snapshot == color_count) {
-		render_rgb_wave(brightness);
-		return;
-	}
-
-	const glow_color_t c = glow_colors[color_index_snapshot];
 	const uint8_t r = (uint8_t)((float)c.r * brightness);
 	const uint8_t g = (uint8_t)((float)c.g * brightness);
 	const uint8_t b = (uint8_t)((float)c.b * brightness);
 	const uint8_t w = (uint8_t)((float)c.w * brightness);
 	led_output_set_all_rgbw(r, g, b, w);
-}
-
-static void render_rgb_wave(float brightness) {
-	const float elapsed = (float)(now_ms() % RGB_WAVE_PERIOD_MS) / (float)RGB_WAVE_PERIOD_MS;
-
-	for (uint8_t pixel = 0; pixel < LED_OUTPUT_COUNT; pixel++) {
-		float hue = (elapsed + (float)pixel / (float)LED_OUTPUT_COUNT) * 6.0f;
-		const uint8_t sector = (uint8_t)hue;
-		const float fraction = hue - (float)sector;
-		const float ramp = 1.0f - fraction;
-		float red = 0.0f;
-		float green = 0.0f;
-		float blue = 0.0f;
-
-		switch (sector % 6U) {
-			case 0: red = 1.0f; green = fraction; break;
-			case 1: red = ramp; green = 1.0f; break;
-			case 2: green = 1.0f; blue = fraction; break;
-			case 3: green = ramp; blue = 1.0f; break;
-			case 4: red = fraction; blue = 1.0f; break;
-			default: red = 1.0f; blue = ramp; break;
-		}
-
-		led_output_set_pixel_rgbw(pixel,
-			(uint8_t)(red * brightness * 255.0f),
-			(uint8_t)(green * brightness * 255.0f),
-			(uint8_t)(blue * brightness * 255.0f),
-			0);
-	}
-
-	led_output_show();
 }
 
 static void handle_button_events(void) {
@@ -288,14 +243,9 @@ void glowstick_mode_init(void) {
 
 void glowstick_mode_next_color(void) {
 	taskENTER_CRITICAL(&glow_state_lock);
-	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
-	glow_color_index = (uint8_t)((glow_color_index + 1U) % (color_count + 1U));
+	glow_color_index = (uint8_t)((glow_color_index + 1U) % (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0])));
 	taskEXIT_CRITICAL(&glow_state_lock);
-	if (glow_color_index == color_count) {
-		ESP_LOGI(TAG, "Glow color: RGB WAVE");
-	} else {
-		ESP_LOGI(TAG, "Glow color: %s", glow_colors[glow_color_index].name);
-	}
+	ESP_LOGI(TAG, "Glow color: %s", glow_colors[glow_color_index].name);
 	render_charge();
 }
 
