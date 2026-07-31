@@ -17,7 +17,9 @@
 #define BNO_REG_SYS_TRIGGER 0x3F
 #define BNO_REG_PAGE_ID 0x07
 #define BNO_REG_CALIB_STAT 0x35
+#define BNO_REG_MAG_DATA 0x0E
 #define BNO_REG_LINACC_DATA 0x28
+#define BNO_REG_GRAVITY_DATA 0x2E
 #define BNO_REG_GYRO_DATA 0x14
 #define BNO_REG_QUATERNION_DATA 0x20
 
@@ -42,6 +44,8 @@ bool bno_resume(void);
 
 typedef struct bno_readings_t {
   int16_t linacc[3];
+  int16_t mag[3];
+  int16_t gravity[3];
   int16_t gyro[3];
   int16_t quat[4];
   uint8_t calib;

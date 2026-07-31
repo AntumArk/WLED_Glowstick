@@ -44,10 +44,18 @@ void teleplot_emit_uint(const char *name, uint32_t value) {
   printf(">%s:%u\n", name, (unsigned int)value);
 }
 
-void emit_bno_teleplot(const uint8_t *linacc, const uint8_t *gyro, const uint8_t *quat, uint8_t calib) {
+void emit_bno_teleplot(const uint8_t *linacc, const uint8_t *mag, const uint8_t *gravity, const uint8_t *gyro, const uint8_t *quat, uint8_t calib) {
   const float lin_x = (float)read_i16_le(&linacc[0]) / 100.0f;
   const float lin_y = (float)read_i16_le(&linacc[2]) / 100.0f;
   const float lin_z = (float)read_i16_le(&linacc[4]) / 100.0f;
+
+  const float mag_x = (float)read_i16_le(&mag[0]) / 16.0f;
+  const float mag_y = (float)read_i16_le(&mag[2]) / 16.0f;
+  const float mag_z = (float)read_i16_le(&mag[4]) / 16.0f;
+
+  const float gravity_x = (float)read_i16_le(&gravity[0]) / 100.0f;
+  const float gravity_y = (float)read_i16_le(&gravity[2]) / 100.0f;
+  const float gravity_z = (float)read_i16_le(&gravity[4]) / 100.0f;
 
   const float gyro_x = (float)read_i16_le(&gyro[0]) / 16.0f;
   const float gyro_y = (float)read_i16_le(&gyro[2]) / 16.0f;
@@ -61,6 +69,12 @@ void emit_bno_teleplot(const uint8_t *linacc, const uint8_t *gyro, const uint8_t
   teleplot_emit_float("bno_lin_x", lin_x);
   teleplot_emit_float("bno_lin_y", lin_y);
   teleplot_emit_float("bno_lin_z", lin_z);
+  teleplot_emit_float("bno_mag_x", mag_x);
+  teleplot_emit_float("bno_mag_y", mag_y);
+  teleplot_emit_float("bno_mag_z", mag_z);
+  teleplot_emit_float("bno_gravity_x", gravity_x);
+  teleplot_emit_float("bno_gravity_y", gravity_y);
+  teleplot_emit_float("bno_gravity_z", gravity_z);
   teleplot_emit_float("bno_gyro_x", gyro_x);
   teleplot_emit_float("bno_gyro_y", gyro_y);
   teleplot_emit_float("bno_gyro_z", gyro_z);
@@ -78,11 +92,15 @@ void emit_bno_teleplot(const uint8_t *linacc, const uint8_t *gyro, const uint8_t
 bool print_bno_status(void) {
   uint8_t calib = 0;
   uint8_t linacc[6] = {0};
+  uint8_t mag[6] = {0};
+  uint8_t gravity[6] = {0};
   uint8_t gyro[6] = {0};
   uint8_t quat[8] = {0};
 
   if (i2c_read_reg(BNO_REG_CALIB_STAT, &calib, 1) != ESP_OK ||
       i2c_read_reg(BNO_REG_LINACC_DATA, linacc, sizeof(linacc)) != ESP_OK ||
+      i2c_read_reg(BNO_REG_MAG_DATA, mag, sizeof(mag)) != ESP_OK ||
+      i2c_read_reg(BNO_REG_GRAVITY_DATA, gravity, sizeof(gravity)) != ESP_OK ||
       i2c_read_reg(BNO_REG_GYRO_DATA, gyro, sizeof(gyro)) != ESP_OK ||
       i2c_read_reg(BNO_REG_QUATERNION_DATA, quat, sizeof(quat)) != ESP_OK) {
     ESP_LOGW(TAG, "BNO055 read failed at 0x%02X", bno_addr);
@@ -93,6 +111,12 @@ bool print_bno_status(void) {
    last_bno_teleplot.linacc[0] = read_i16_le(&linacc[0]);
     last_bno_teleplot.linacc[1] = read_i16_le(&linacc[2]);
     last_bno_teleplot.linacc[2] = read_i16_le(&linacc[4]);
+    last_bno_teleplot.mag[0] = read_i16_le(&mag[0]);
+    last_bno_teleplot.mag[1] = read_i16_le(&mag[2]);
+    last_bno_teleplot.mag[2] = read_i16_le(&mag[4]);
+    last_bno_teleplot.gravity[0] = read_i16_le(&gravity[0]);
+    last_bno_teleplot.gravity[1] = read_i16_le(&gravity[2]);
+    last_bno_teleplot.gravity[2] = read_i16_le(&gravity[4]);
     last_bno_teleplot.gyro[0] = read_i16_le(&gyro[0]);
     last_bno_teleplot.gyro[1] = read_i16_le(&gyro[2]);
     last_bno_teleplot.gyro[2] = read_i16_le(&gyro[4]);
@@ -101,7 +125,7 @@ bool print_bno_status(void) {
     last_bno_teleplot.quat[2] = read_i16_le(&quat[4]);
     last_bno_teleplot.quat[3] = read_i16_le(&quat[6]);
 
-  emit_bno_teleplot(linacc, gyro, quat, calib);
+  emit_bno_teleplot(linacc, mag, gravity, gyro, quat, calib);
   return true;
 }
 

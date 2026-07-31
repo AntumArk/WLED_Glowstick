@@ -11,14 +11,17 @@
 #include "esp_log.h"
 #include "button_task.h"
 #include "led_output.h"
+#include "swing_mode.h"
 
 #define GLOW_GREEN_MAX 255U
-#define SWING_AVG_WINDOW 48
-#define CHARGE_TIME_MS 1200
-#define LOW_FREQ_ENVELOPE_TAU_MS 350.0f
-#define SWING_MAG_SATURATION 0.012f
-#define MAX_CHARGE_STEP_PER_UPDATE 0.010f
+#define SWING_PEAK_THRESHOLD_MS2 15.0f
+#define SWING_PEAK_COOLDOWN_MS 140U
 #define BUTTON_WAKE_GPIO GPIO_NUM_0
+#define BALL_TUBE_LENGTH_M 0.20f
+#define BALL_ACCELERATION_SCALE 0.8f
+#define BALL_DAMPING_PER_SECOND 1.5f
+#define BALL_BOUNCE_RESTITUTION 0.65f
+#define BALL_CHARGE_RATE_PER_SECOND 0.8f
 
 typedef struct {
 	uint8_t r;
@@ -37,22 +40,21 @@ static const glow_color_t glow_colors[] = {
 	{140, 255, 0, 0, "LIME"},
 	{255, 0, 0, 0, "RED"},
 	{0, 0, 0, 255, "WHITE"},
+	{255, 255, 255, 255, "BLAST"},
 };
 static volatile uint8_t glow_color_index = 0;
 static portMUX_TYPE glow_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static float swing_history[SWING_AVG_WINDOW] = {0.0f};
-static uint8_t swing_hist_count = 0;
-static uint8_t swing_hist_index = 0;
-static float swing_hist_sum = 0.0f;
-
-static float prev_quat[4] = {0.0f};
-static bool prev_quat_valid = false;
 static uint32_t last_mode_update_ms = 0;
-static float charge = 1.0f;
-static float low_freq_envelope = 0.0f;
+static uint32_t last_swing_peak_ms = 0;
+static bool swing_armed = true;
+static float led_charge[LED_OUTPUT_COUNT] = {0.0f};
+static float ball_position = BALL_TUBE_LENGTH_M / 2.0f;
+static float ball_velocity = 0.0f;
 
 static void render_charge(void);
+static void update_bouncing_ball(float dt_seconds, const float linear_acceleration_ms2[3]);
+static void render_bouncing_ball(const glow_color_t *color);
 
 static void blink_sleep_ready(void) {
 	for (int i = 0; i < 2; i++) {
@@ -87,59 +89,77 @@ static uint32_t now_ms(void) {
   return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
-static bool get_current_quat(float q[4]) {
+static bool get_current_linear_acceleration(float linear_acceleration_ms2[3]) {
 	if (!bno_ready) return false;
 
-	q[0] = (float)last_bno_teleplot.quat[0] / 16384.0f;
-	q[1] = (float)last_bno_teleplot.quat[1] / 16384.0f;
-	q[2] = (float)last_bno_teleplot.quat[2] / 16384.0f;
-	q[3] = (float)last_bno_teleplot.quat[3] / 16384.0f;
-
-	const float norm = sqrtf((q[0] * q[0]) + (q[1] * q[1]) + (q[2] * q[2]) + (q[3] * q[3]));
-	if (norm < 0.0001f) return false;
-
-	q[0] /= norm;
-	q[1] /= norm;
-	q[2] /= norm;
-	q[3] /= norm;
+	linear_acceleration_ms2[0] = (float)last_bno_teleplot.linacc[0] / 100.0f;
+	linear_acceleration_ms2[1] = (float)last_bno_teleplot.linacc[1] / 100.0f;
+	linear_acceleration_ms2[2] = (float)last_bno_teleplot.linacc[2] / 100.0f;
 	return true;
-}
-
-static void push_swing_sample(float sample) {
-	if (swing_hist_count < SWING_AVG_WINDOW) {
-		swing_history[swing_hist_count++] = sample;
-		swing_hist_sum += sample;
-		return;
-	}
-
-	swing_hist_sum -= swing_history[swing_hist_index];
-	swing_history[swing_hist_index] = sample;
-	swing_hist_sum += sample;
-	swing_hist_index = (uint8_t)((swing_hist_index + 1U) % SWING_AVG_WINDOW);
-}
-
-static float get_swing_average(void) {
-	if (swing_hist_count == 0U) return 0.0f;
-	return swing_hist_sum / (float)swing_hist_count;
 }
 
 static void render_charge(void) {
 	if (!led_output_ready()) return;
 
 	uint8_t color_index_snapshot = 0;
-	float charge_snapshot = 0.0f;
 	taskENTER_CRITICAL(&glow_state_lock);
 	color_index_snapshot = glow_color_index;
-	charge_snapshot = charge;
 	taskEXIT_CRITICAL(&glow_state_lock);
 
-	const glow_color_t c = glow_colors[color_index_snapshot % (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]))];
-	const float brightness = clamp01(charge_snapshot);
-	const uint8_t r = (uint8_t)((float)c.r * brightness);
-	const uint8_t g = (uint8_t)((float)c.g * brightness);
-	const uint8_t b = (uint8_t)((float)c.b * brightness);
-	const uint8_t w = (uint8_t)((float)c.w * brightness);
-	led_output_set_all_rgbw(r, g, b, w);
+	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
+	if (color_index_snapshot == color_count) {
+		swing_mode_render(now_ms());
+		return;
+	}
+
+	const glow_color_t c = glow_colors[color_index_snapshot];
+	render_bouncing_ball(&c);
+}
+
+
+static void update_bouncing_ball(float dt_seconds, const float linear_acceleration_ms2[3]) {
+	ball_velocity += linear_acceleration_ms2[1] * BALL_ACCELERATION_SCALE * dt_seconds;
+	ball_velocity /= 1.0f + (BALL_DAMPING_PER_SECOND * dt_seconds);
+	ball_position += ball_velocity * dt_seconds;
+
+	if (ball_position < 0.0f) {
+		ball_position = -ball_position;
+		ball_velocity = -ball_velocity * BALL_BOUNCE_RESTITUTION;
+	} else if (ball_position > BALL_TUBE_LENGTH_M) {
+		ball_position = 2.0f * BALL_TUBE_LENGTH_M - ball_position;
+		ball_velocity = -ball_velocity * BALL_BOUNCE_RESTITUTION;
+	}
+
+	for (uint8_t led = 0; led < LED_OUTPUT_COUNT; led++) {
+		led_charge[led] = clamp01(led_charge[led] - dt_seconds / ((float)TIME_TO_FADE_MS / 1000.0f));
+	}
+
+	const uint8_t ball_led = (uint8_t)lroundf(
+		(ball_position / BALL_TUBE_LENGTH_M) * (float)(LED_OUTPUT_COUNT - 1U));
+	led_charge[ball_led] = clamp01(led_charge[ball_led] + BALL_CHARGE_RATE_PER_SECOND * dt_seconds);
+}
+
+static void render_bouncing_ball(const glow_color_t *color) {
+	float charge_snapshot[LED_OUTPUT_COUNT] = {0.0f};
+	float ball_position_snapshot = 0.0f;
+	taskENTER_CRITICAL(&glow_state_lock);
+	for (uint8_t led = 0; led < LED_OUTPUT_COUNT; led++) {
+		charge_snapshot[led] = led_charge[led];
+	}
+	ball_position_snapshot = ball_position;
+	taskEXIT_CRITICAL(&glow_state_lock);
+
+	for (uint8_t led = 0; led < LED_OUTPUT_COUNT; led++) {
+		const float brightness = charge_snapshot[led];
+		led_output_set_pixel_rgbw(led, (uint8_t)((float)color->r * brightness),
+			(uint8_t)((float)color->g * brightness), (uint8_t)((float)color->b * brightness),
+			(uint8_t)((float)color->w * brightness));
+	}
+
+	const uint8_t ball_led = (uint8_t)lroundf(
+		(ball_position_snapshot / BALL_TUBE_LENGTH_M) * (float)(LED_OUTPUT_COUNT - 1U));
+	led_output_set_pixel_rgbw(ball_led, color->r, color->g, color->b, color->w);
+	led_output_show();
 }
 
 static void handle_button_events(void) {
@@ -177,47 +197,27 @@ void glowstick_task() {
 	if (dt_ms > 100U) dt_ms = 100U;
 	last_mode_update_ms = now;
 
-	float frame_swing_mag = 0.0f;
-	float quat[4] = {0.0f};
-	if (get_current_quat(quat)) {
-		if (prev_quat_valid) {
-			float dot = (quat[0] * prev_quat[0]) + (quat[1] * prev_quat[1]) + (quat[2] * prev_quat[2]) + (quat[3] * prev_quat[3]);
-			dot = fabsf(dot);
-			if (dot > 1.0f) dot = 1.0f;
-
-			const float delta_angle = 2.0f * acosf(dot);
-			frame_swing_mag = delta_angle;
-		}
-
-		prev_quat[0] = quat[0];
-		prev_quat[1] = quat[1];
-		prev_quat[2] = quat[2];
-		prev_quat[3] = quat[3];
-		prev_quat_valid = true;
-	} else {
-		prev_quat_valid = false;
-	}
-
-	// Low-frequency envelope: suppress frame spikes and keep sustained swinging.
-	const float alpha = (float)dt_ms / (LOW_FREQ_ENVELOPE_TAU_MS + (float)dt_ms);
-	low_freq_envelope += alpha * (frame_swing_mag - low_freq_envelope);
-	push_swing_sample(low_freq_envelope);
-
-	// Always decay toward off when idle, then add charge from sustained swing.
+	float linear_acceleration_ms2[3] = {0.0f};
+	const bool have_linear_acceleration = get_current_linear_acceleration(linear_acceleration_ms2);
+	const float linear_acceleration_magnitude = sqrtf(
+		linear_acceleration_ms2[0] * linear_acceleration_ms2[0] +
+		linear_acceleration_ms2[1] * linear_acceleration_ms2[1] +
+		linear_acceleration_ms2[2] * linear_acceleration_ms2[2]);
+	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
 	taskENTER_CRITICAL(&glow_state_lock);
-	charge -= (float)dt_ms / (float)TIME_TO_FADE_MS;
-
-	const float swing_avg = get_swing_average();
-	if (swing_avg > SHAKE_POWER_THRESHOLD) {
-		float norm = (swing_avg - SHAKE_POWER_THRESHOLD) / (SWING_MAG_SATURATION - SHAKE_POWER_THRESHOLD);
-		if (norm < 0.0f) norm = 0.0f;
-		if (norm > 1.0f) norm = 1.0f;
-		float add = norm * ((float)dt_ms / (float)CHARGE_TIME_MS);
-		if (add > MAX_CHARGE_STEP_PER_UPDATE) add = MAX_CHARGE_STEP_PER_UPDATE;
-		charge += add;
+	if (glow_color_index == color_count) {
+		if (have_linear_acceleration && linear_acceleration_magnitude < SWING_PEAK_THRESHOLD_MS2) {
+			swing_armed = true;
+		}
+		if (have_linear_acceleration && swing_armed && linear_acceleration_magnitude >= SWING_PEAK_THRESHOLD_MS2 &&
+			(now - last_swing_peak_ms) >= SWING_PEAK_COOLDOWN_MS) {
+			swing_mode_handle_peak(now);
+			last_swing_peak_ms = now;
+			swing_armed = false;
+		}
+	} else if (have_linear_acceleration) {
+		update_bouncing_ball((float)dt_ms / 1000.0f, linear_acceleration_ms2);
 	}
-
-	charge = clamp01(charge);
 	taskEXIT_CRITICAL(&glow_state_lock);
 	render_charge();
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -225,13 +225,15 @@ void glowstick_task() {
 }
 
 void glowstick_mode_init(void) {
-	swing_hist_count = 0;
-	swing_hist_index = 0;
-	swing_hist_sum = 0.0f;
-	prev_quat_valid = false;
 	last_mode_update_ms = 0;
-	low_freq_envelope = 0.0f;
-	charge = 1.0f;
+	last_swing_peak_ms = 0;
+	swing_armed = true;
+	ball_position = BALL_TUBE_LENGTH_M / 2.0f;
+	ball_velocity = 0.0f;
+	for (uint8_t led = 0; led < LED_OUTPUT_COUNT; led++) {
+		led_charge[led] = 1.0f;
+	}
+	swing_mode_reset();
 	glow_color_index = 0;
 	led_output_init();
 	bno_ready = init_bno();
@@ -243,15 +245,23 @@ void glowstick_mode_init(void) {
 
 void glowstick_mode_next_color(void) {
 	taskENTER_CRITICAL(&glow_state_lock);
-	glow_color_index = (uint8_t)((glow_color_index + 1U) % (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0])));
+	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
+	glow_color_index = (uint8_t)((glow_color_index + 1U) % (color_count + 1U));
+	swing_mode_reset();
 	taskEXIT_CRITICAL(&glow_state_lock);
-	ESP_LOGI(TAG, "Glow color: %s", glow_colors[glow_color_index].name);
+	if (glow_color_index == color_count) {
+		ESP_LOGI(TAG, "Glow color: PEAK FLASH");
+	} else {
+		ESP_LOGI(TAG, "Glow color: %s", glow_colors[glow_color_index].name);
+	}
 	render_charge();
 }
 
 void glowstick_mode_charge_full(void) {
 	taskENTER_CRITICAL(&glow_state_lock);
-	charge = 1.0f;
+	for (uint8_t led = 0; led < LED_OUTPUT_COUNT; led++) {
+		led_charge[led] = 1.0f;
+	}
 	taskEXIT_CRITICAL(&glow_state_lock);
 	render_charge();
 }
