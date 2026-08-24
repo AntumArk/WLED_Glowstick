@@ -6,7 +6,7 @@
 #include "led_output.h"
 
 #define PEAK_FLASH_FADE_IN_MS 100U
-#define PEAK_FLASH_FADE_OUT_MS 100U
+#define PEAK_FLASH_FADE_OUT_MS 500U
 #define PEAK_FLASH_DURATION_MS (PEAK_FLASH_FADE_IN_MS + PEAK_FLASH_FADE_OUT_MS)
 
 static uint32_t flash_started_ms = 0;
