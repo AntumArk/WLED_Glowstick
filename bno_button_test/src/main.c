@@ -6,10 +6,15 @@
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 #include "battery.h"
 #include "button_task.h"
 #include "glowstick_mode.h"
+#include "osc.h"
+#include "osc_config.h"
+#include "wifi_manager.h"
+#include "wifi_web_config.h"
 
 static const char *TAG = "bno_button_test";
 
@@ -23,6 +28,20 @@ void app_main(void) {
     ESP_LOGI(TAG, "Wakeup cause: BUTTON (EXT1)");
   } else {
     ESP_LOGI(TAG, "Wakeup causes bitmap: 0x%08lx", (unsigned long)wake_causes);
+  }
+
+  esp_err_t nvs_err = nvs_flash_init();
+  if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    nvs_err = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(nvs_err);
+
+  wifi_manager_init();
+  osc_init();
+  osc_config_init();
+  if (wifi_manager_is_ap_mode()) {
+    wifi_web_config_start();
   }
 
   start_battery_task();

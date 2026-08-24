@@ -13,3 +13,10 @@
 
 void start_battery_task(void);
 
+/* Last-measured pack voltage (volts) and estimated charge percent (0-100),
+ * updated every ~10s by battery_task(); 0 before the first reading or if
+ * the ADC never initialized. Safe to call from any task - these are plain
+ * floats updated atomically enough for a slow-changing display value. */
+float battery_get_voltage(void);
+float battery_get_percent(void);
+

@@ -37,6 +37,35 @@
       "presentation": {
         "panel": "shared"
       }
+    },
+    {
+      "label": "Glowstick C6: Build",
+      "type": "process",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "--project-dir",
+        "${workspaceFolder}/bno_button_test",
+        "--environment",
+        "xiao_c6_test"
+      ],
+      "problemMatcher": "$gcc",
+      "group": "build"
+    },
+    {
+      "label": "Glowstick C6: Upload",
+      "type": "process",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "--project-dir",
+        "${workspaceFolder}/bno_button_test",
+        "--environment",
+        "xiao_c6_test",
+        "--target",
+        "upload"
+      ],
+      "problemMatcher": "$gcc"
     }
   ]
 }

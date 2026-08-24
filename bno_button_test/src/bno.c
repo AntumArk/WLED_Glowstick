@@ -35,97 +35,52 @@ int16_t read_i16_le(const uint8_t *buf) {
   return (int16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
 }
 
-void teleplot_emit_float(const char *name, float value) {
-  // Teleplot serial parser expects lines prefixed with '>'
-  printf(">%s:%.5f\n", name, value);
-}
-
-void teleplot_emit_uint(const char *name, uint32_t value) {
-  printf(">%s:%u\n", name, (unsigned int)value);
-}
-
-void emit_bno_teleplot(const uint8_t *linacc, const uint8_t *mag, const uint8_t *gravity, const uint8_t *gyro, const uint8_t *quat, uint8_t calib) {
-  const float lin_x = (float)read_i16_le(&linacc[0]) / 100.0f;
-  const float lin_y = (float)read_i16_le(&linacc[2]) / 100.0f;
-  const float lin_z = (float)read_i16_le(&linacc[4]) / 100.0f;
-
-  const float mag_x = (float)read_i16_le(&mag[0]) / 16.0f;
-  const float mag_y = (float)read_i16_le(&mag[2]) / 16.0f;
-  const float mag_z = (float)read_i16_le(&mag[4]) / 16.0f;
-
-  const float gravity_x = (float)read_i16_le(&gravity[0]) / 100.0f;
-  const float gravity_y = (float)read_i16_le(&gravity[2]) / 100.0f;
-  const float gravity_z = (float)read_i16_le(&gravity[4]) / 100.0f;
-
-  const float gyro_x = (float)read_i16_le(&gyro[0]) / 16.0f;
-  const float gyro_y = (float)read_i16_le(&gyro[2]) / 16.0f;
-  const float gyro_z = (float)read_i16_le(&gyro[4]) / 16.0f;
-
-  const float x = (float)read_i16_le(&quat[0]) / 16384.0f;
-  const float y = (float)read_i16_le(&quat[2]) / 16384.0f;
-  const float z = (float)read_i16_le(&quat[4]) / 16384.0f;
-  const float w = (float)read_i16_le(&quat[6]) / 16384.0f;
-
-  teleplot_emit_float("bno_lin_x", lin_x);
-  teleplot_emit_float("bno_lin_y", lin_y);
-  teleplot_emit_float("bno_lin_z", lin_z);
-  teleplot_emit_float("bno_mag_x", mag_x);
-  teleplot_emit_float("bno_mag_y", mag_y);
-  teleplot_emit_float("bno_mag_z", mag_z);
-  teleplot_emit_float("bno_gravity_x", gravity_x);
-  teleplot_emit_float("bno_gravity_y", gravity_y);
-  teleplot_emit_float("bno_gravity_z", gravity_z);
-  teleplot_emit_float("bno_gyro_x", gyro_x);
-  teleplot_emit_float("bno_gyro_y", gyro_y);
-  teleplot_emit_float("bno_gyro_z", gyro_z);
-  teleplot_emit_float("bno_quat_x", x);
-  teleplot_emit_float("bno_quat_y", y);
-  teleplot_emit_float("bno_quat_z", z);
-  teleplot_emit_float("bno_quat_w", w);
-  teleplot_emit_uint("bno_cal_sys", (calib >> 6) & 0x03);
-  teleplot_emit_uint("bno_cal_gyro", (calib >> 4) & 0x03);
-  teleplot_emit_uint("bno_cal_accel", (calib >> 2) & 0x03);
-  teleplot_emit_uint("bno_cal_mag", calib & 0x03);
-}
-
 
 bool print_bno_status(void) {
-  uint8_t calib = 0;
-  uint8_t linacc[6] = {0};
-  uint8_t mag[6] = {0};
-  uint8_t gravity[6] = {0};
-  uint8_t gyro[6] = {0};
-  uint8_t quat[8] = {0};
+  enum {
+    TELEMETRY_LENGTH = BNO_REG_OPR_MODE - BNO_REG_MAG_DATA + 1,
+    MAG_OFFSET = BNO_REG_MAG_DATA - BNO_REG_MAG_DATA,
+    GYRO_OFFSET = BNO_REG_GYRO_DATA - BNO_REG_MAG_DATA,
+    QUAT_OFFSET = BNO_REG_QUATERNION_DATA - BNO_REG_MAG_DATA,
+    LINACC_OFFSET = BNO_REG_LINACC_DATA - BNO_REG_MAG_DATA,
+    GRAVITY_OFFSET = BNO_REG_GRAVITY_DATA - BNO_REG_MAG_DATA,
+    TEMP_OFFSET = BNO_REG_TEMP - BNO_REG_MAG_DATA,
+    CALIB_OFFSET = BNO_REG_CALIB_STAT - BNO_REG_MAG_DATA,
+    SYS_STATUS_OFFSET = BNO_REG_SYS_STATUS - BNO_REG_MAG_DATA,
+    SYS_ERROR_OFFSET = BNO_REG_SYS_ERR - BNO_REG_MAG_DATA,
+    OP_MODE_OFFSET = BNO_REG_OPR_MODE - BNO_REG_MAG_DATA,
+  };
+  uint8_t telemetry[TELEMETRY_LENGTH] = {0};
 
-  if (i2c_read_reg(BNO_REG_CALIB_STAT, &calib, 1) != ESP_OK ||
-      i2c_read_reg(BNO_REG_LINACC_DATA, linacc, sizeof(linacc)) != ESP_OK ||
-      i2c_read_reg(BNO_REG_MAG_DATA, mag, sizeof(mag)) != ESP_OK ||
-      i2c_read_reg(BNO_REG_GRAVITY_DATA, gravity, sizeof(gravity)) != ESP_OK ||
-      i2c_read_reg(BNO_REG_GYRO_DATA, gyro, sizeof(gyro)) != ESP_OK ||
-      i2c_read_reg(BNO_REG_QUATERNION_DATA, quat, sizeof(quat)) != ESP_OK) {
+  if (i2c_read_reg(BNO_REG_MAG_DATA, telemetry, sizeof(telemetry)) != ESP_OK) {
     ESP_LOGW(TAG, "BNO055 read failed at 0x%02X", bno_addr);
     bno_ready = false;
     return false;
   }
 
-   last_bno_teleplot.linacc[0] = read_i16_le(&linacc[0]);
-    last_bno_teleplot.linacc[1] = read_i16_le(&linacc[2]);
-    last_bno_teleplot.linacc[2] = read_i16_le(&linacc[4]);
-    last_bno_teleplot.mag[0] = read_i16_le(&mag[0]);
-    last_bno_teleplot.mag[1] = read_i16_le(&mag[2]);
-    last_bno_teleplot.mag[2] = read_i16_le(&mag[4]);
-    last_bno_teleplot.gravity[0] = read_i16_le(&gravity[0]);
-    last_bno_teleplot.gravity[1] = read_i16_le(&gravity[2]);
-    last_bno_teleplot.gravity[2] = read_i16_le(&gravity[4]);
-    last_bno_teleplot.gyro[0] = read_i16_le(&gyro[0]);
-    last_bno_teleplot.gyro[1] = read_i16_le(&gyro[2]);
-    last_bno_teleplot.gyro[2] = read_i16_le(&gyro[4]);
-    last_bno_teleplot.quat[0] = read_i16_le(&quat[0]);
-    last_bno_teleplot.quat[1] = read_i16_le(&quat[2]);
-    last_bno_teleplot.quat[2] = read_i16_le(&quat[4]);
-    last_bno_teleplot.quat[3] = read_i16_le(&quat[6]);
+  last_bno_teleplot.linacc[0] = read_i16_le(&telemetry[LINACC_OFFSET]);
+  last_bno_teleplot.linacc[1] = read_i16_le(&telemetry[LINACC_OFFSET + 2]);
+  last_bno_teleplot.linacc[2] = read_i16_le(&telemetry[LINACC_OFFSET + 4]);
+  last_bno_teleplot.mag[0] = read_i16_le(&telemetry[MAG_OFFSET]);
+  last_bno_teleplot.mag[1] = read_i16_le(&telemetry[MAG_OFFSET + 2]);
+  last_bno_teleplot.mag[2] = read_i16_le(&telemetry[MAG_OFFSET + 4]);
+  last_bno_teleplot.gravity[0] = read_i16_le(&telemetry[GRAVITY_OFFSET]);
+  last_bno_teleplot.gravity[1] = read_i16_le(&telemetry[GRAVITY_OFFSET + 2]);
+  last_bno_teleplot.gravity[2] = read_i16_le(&telemetry[GRAVITY_OFFSET + 4]);
+  last_bno_teleplot.gyro[0] = read_i16_le(&telemetry[GYRO_OFFSET]);
+  last_bno_teleplot.gyro[1] = read_i16_le(&telemetry[GYRO_OFFSET + 2]);
+  last_bno_teleplot.gyro[2] = read_i16_le(&telemetry[GYRO_OFFSET + 4]);
+  last_bno_teleplot.quat[0] = read_i16_le(&telemetry[QUAT_OFFSET]);
+  last_bno_teleplot.quat[1] = read_i16_le(&telemetry[QUAT_OFFSET + 2]);
+  last_bno_teleplot.quat[2] = read_i16_le(&telemetry[QUAT_OFFSET + 4]);
+  last_bno_teleplot.quat[3] = read_i16_le(&telemetry[QUAT_OFFSET + 6]);
+  last_bno_teleplot.calib = telemetry[CALIB_OFFSET];
+  last_bno_teleplot.op_mode = telemetry[OP_MODE_OFFSET];
+  last_bno_teleplot.sys_status = telemetry[SYS_STATUS_OFFSET];
+  last_bno_teleplot.sys_error = telemetry[SYS_ERROR_OFFSET];
+  last_bno_teleplot.temp_c = (int8_t)telemetry[TEMP_OFFSET];
+  last_bno_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
-  emit_bno_teleplot(linacc, mag, gravity, gyro, quat, calib);
   return true;
 }
 
@@ -200,6 +155,48 @@ bool bno_resume(void) {
   return true;
 }
 
+// AI: below section was generated by an AI
+/* Resets sensor state that can survive an MCU-only reset, then waits for BNO055 startup. */
+static bool reset_bno(void) {
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_CONFIG) != ESP_OK) return false;
+  vTaskDelay(pdMS_TO_TICKS(30));
+  if (i2c_write_reg(BNO_REG_SYS_TRIGGER, BNO_SYS_TRIGGER_RST_SYS) != ESP_OK) return false;
+  vTaskDelay(pdMS_TO_TICKS(700));
+
+  for (int retry = 0; retry < 20; retry++) {
+    uint8_t chip_id = 0;
+    if (i2c_read_reg(BNO_REG_CHIP_ID, &chip_id, 1) == ESP_OK && chip_id == 0xA0) return true;
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  return false;
+}
+// AI: end
+
+// AI: below section was generated by an AI
+/* Samples the raw magnetometer outside fusion mode, then restores NDOF. */
+static bool probe_magonly(void) {
+  uint8_t raw[6] = {0};
+
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_CONFIG) != ESP_OK) return false;
+  vTaskDelay(pdMS_TO_TICKS(30));
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_MAGONLY) != ESP_OK) return false;
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  const bool read_ok = i2c_read_reg(BNO_REG_MAG_DATA, raw, sizeof(raw)) == ESP_OK;
+  if (read_ok) {
+    last_bno_teleplot.mag_probe[0] = read_i16_le(&raw[0]);
+    last_bno_teleplot.mag_probe[1] = read_i16_le(&raw[2]);
+    last_bno_teleplot.mag_probe[2] = read_i16_le(&raw[4]);
+  }
+
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_CONFIG) != ESP_OK) return false;
+  vTaskDelay(pdMS_TO_TICKS(30));
+  if (i2c_write_reg(BNO_REG_OPR_MODE, BNO_MODE_NDOF) != ESP_OK) return false;
+  vTaskDelay(pdMS_TO_TICKS(100));
+  return read_ok;
+}
+// AI: end
+
 bool try_init_bno_on_addr(uint8_t addr) {
   if (i2c_master_probe(i2c_bus, addr, 200) != ESP_OK) {
     ESP_LOGW(TAG, "BNO055 not responding at 0x%02X", addr);
@@ -237,10 +234,42 @@ bool try_init_bno_on_addr(uint8_t addr) {
     return false;
   }
 
+  if (!reset_bno()) {
+    ESP_LOGW(TAG, "BNO055 reset failed at 0x%02X", bno_addr);
+    i2c_master_bus_rm_device(bno_dev);
+    bno_dev = NULL;
+    return false;
+  }
+
   if (!bno_resume()) {
     i2c_master_bus_rm_device(bno_dev);
     bno_dev = NULL;
     return false;
+  }
+
+  if (probe_magonly()) {
+    ESP_LOGI(TAG, "BNO055 MAGONLY probe raw X=%d Y=%d Z=%d",
+             last_bno_teleplot.mag_probe[0], last_bno_teleplot.mag_probe[1],
+             last_bno_teleplot.mag_probe[2]);
+  } else {
+    ESP_LOGW(TAG, "BNO055 MAGONLY probe failed");
+  }
+
+  uint8_t st_result = 0;
+  if (i2c_read_reg(BNO_REG_ST_RESULT, &st_result, 1) == ESP_OK) {
+    last_bno_teleplot.selftest = st_result;
+    ESP_LOGI(TAG, "BNO055 self-test result 0x%02X: MCU=%d GYR=%d ACC=%d MAG=%d",
+             st_result, st_result & 0x01, (st_result >> 1) & 0x01,
+             (st_result >> 2) & 0x01, (st_result >> 3) & 0x01);
+    if (((st_result >> 3) & 0x01) == 0) {
+      ESP_LOGW(TAG, "BNO055 magnetometer failed power-on self-test - this board's "
+                    "magnetometer hardware is likely non-functional (common on some "
+                    "BNO055 clone/counterfeit modules); /glowstick/mag will read all "
+                    "zeros regardless of firmware and calib_stat's mag bits may be "
+                    "misleadingly stuck at 3");
+    }
+  } else {
+    ESP_LOGW(TAG, "Failed to read BNO055 self-test result register");
   }
 
   ESP_LOGI(TAG, "BNO055 ready at 0x%02X", bno_addr);
@@ -267,14 +296,16 @@ void init_i2c(void) {
 
 void bno_task(void *arg) {
   ESP_LOGI(TAG, "BNO task started");
+  TickType_t next_sample = xTaskGetTickCount();
   while (1) {
     if (bno_sleeping) {
       vTaskDelay(pdMS_TO_TICKS(50));
+      next_sample = xTaskGetTickCount();
       continue;
     }
 
     bno_ready = print_bno_status();
-    vTaskDelay(pdMS_TO_TICKS(BNO_SAMPLE_PERIOD_MS));
+    xTaskDelayUntil(&next_sample, pdMS_TO_TICKS(BNO_SAMPLE_PERIOD_MS));
   }
 }
 

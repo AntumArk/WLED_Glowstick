@@ -13,6 +13,8 @@ bool battery_ready = false;
 adc_cali_handle_t adc_cali = NULL;
 bool adc_cali_enabled = false;
 uint32_t last_battery_ms = 0;
+static float last_battery_voltage = 0.0f;
+static float last_battery_percent = 0.0f;
 
 TaskHandle_t battery_task_handle = NULL;
 
@@ -90,8 +92,13 @@ void print_battery_status(void) {
 
   const float battery_v = ((float)mv / 1000.0f) * BATTERY_DIVIDER;
   const float percent = clampf((battery_v - BATTERY_VMIN) / (BATTERY_VMAX - BATTERY_VMIN) * 100.0f, 0.0f, 100.0f);
+  last_battery_voltage = battery_v;
+  last_battery_percent = percent;
   ESP_LOGI(TAG, "BATT: %.3fV (%.0f%%) raw=%d", battery_v, percent, raw_avg);
 }
+
+float battery_get_voltage(void) { return last_battery_voltage; }
+float battery_get_percent(void) { return last_battery_percent; }
 
 void battery_task(void *arg) {
   while (1) {
