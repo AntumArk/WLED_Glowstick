@@ -7,3 +7,4 @@
  * try to join that network on next boot (see wifi_manager.c). Only useful
  * (and only started) while the device is running as an access point. */
 void wifi_web_config_start(void);
+void wifi_web_config_stop(void);

@@ -10,7 +10,6 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_sleep.h"
-#include "state_machine.h"
 #include "bno.h"
 #include "led_output.h"
 
@@ -107,7 +106,6 @@ static void button_task(void *arg) {
             enter_deep_sleep();
           } else if (button_press_start_ms != 0 &&
               (now - button_press_start_ms) < BUTTON_LONG_PRESS_MS) {
-            next_device_state(); // STATE SWITCHES HERE
             publish_button_event(BUTTON_EVENT_SHORT_PRESS, now);
           }
           button_press_start_ms = 0;

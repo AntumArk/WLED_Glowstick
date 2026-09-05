@@ -5,6 +5,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "lwip/inet.h"
+#include "mdns.h"
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -16,6 +18,7 @@
 
 static const char *TAG = "wifi_manager";
 static const char *NVS_NAMESPACE = "wificfg";
+static const char *WIFI_HOSTNAME = "glowstick-osc";
 
 /* XIAO ESP32C6 hardware quirk (undocumented in ESP-IDF, only in Seeed's
  * Arduino examples): the board has an RF switch between the onboard
@@ -39,6 +42,15 @@ static void configure_onboard_antenna(void) {
   gpio_set_level(WIFI_RF_ANTENNA_SELECT_GPIO, 0); /* select onboard ceramic antenna */
 }
 
+static void configure_hostname(esp_netif_t *netif) {
+  if (netif == NULL) return;
+
+  const esp_err_t err = esp_netif_set_hostname(netif, WIFI_HOSTNAME);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "failed to set hostname on netif: %s", esp_err_to_name(err));
+  }
+}
+
 /* Open SoftAP so any phone/laptop can join without needing a shared secret
  * for a throwaway test rig; document this clearly if this ever leaves the
  * test-bench context. */
@@ -53,15 +65,50 @@ static void configure_onboard_antenna(void) {
 #define WIFI_FAIL_BIT BIT1
 
 static EventGroupHandle_t wifi_event_group;
+static esp_netif_t *sta_netif;
+static esp_netif_t *ap_netif;
+static bool wifi_initialized = false;
+static bool mdns_started = false;
 static bool ap_mode = false;
 static char ip_str[16] = "0.0.0.0";
+static uint32_t ip_addr_nbo = 0;
+static uint32_t netmask_nbo = 0;
 static uint32_t sta_retry_count = 0;
+
+static void start_mdns(void) {
+  if (mdns_started) return;
+
+  esp_err_t err = mdns_init();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "failed to init mDNS: %s", esp_err_to_name(err));
+    return;
+  }
+
+  err = mdns_hostname_set(WIFI_HOSTNAME);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "failed to set mDNS hostname: %s", esp_err_to_name(err));
+    mdns_free();
+    return;
+  }
+
+  err = mdns_instance_name_set("Glowstick OSC");
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "failed to set mDNS instance name: %s", esp_err_to_name(err));
+    mdns_free();
+    return;
+  }
+
+  mdns_started = true;
+  ESP_LOGI(TAG, "mDNS started: %s.local", WIFI_HOSTNAME);
+}
 
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
   (void)arg;
   if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     esp_ip4addr_ntoa(&event->ip_info.ip, ip_str, sizeof(ip_str));
+    ip_addr_nbo = event->ip_info.ip.addr;
+    netmask_nbo = event->ip_info.netmask.addr;
     ESP_LOGI(TAG, "station got ip: %s", ip_str);
     xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
   }
@@ -122,7 +169,8 @@ static bool try_connect_station(void) {
   ESP_LOGI(TAG, "attempting to join configured network \"%s\"", ssid);
   sta_retry_count = 0;
 
-  esp_netif_create_default_wifi_sta();
+  if (sta_netif == NULL) sta_netif = esp_netif_create_default_wifi_sta();
+  configure_hostname(sta_netif);
 
   wifi_config_t wifi_config = {0};
   strlcpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
@@ -174,7 +222,8 @@ static bool try_connect_station(void) {
 
 static void start_access_point(void) {
   ap_mode = true;
-  esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
+  if (ap_netif == NULL) ap_netif = esp_netif_create_default_wifi_ap();
+  configure_hostname(ap_netif);
 
   wifi_config_t wifi_config = {0};
   strlcpy((char *)wifi_config.ap.ssid, WIFI_AP_SSID, sizeof(wifi_config.ap.ssid));
@@ -190,31 +239,71 @@ static void start_access_point(void) {
   esp_netif_ip_info_t ip_info;
   esp_netif_get_ip_info(ap_netif, &ip_info);
   esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
+  ip_addr_nbo = ip_info.ip.addr;
+  netmask_nbo = ip_info.netmask.addr;
   ESP_LOGI(TAG, "hotspot \"%s\" (open) started, ip=%s", WIFI_AP_SSID, ip_str);
 }
 
 void wifi_manager_init(void) {
   configure_onboard_antenna();
 
-  wifi_event_group = xEventGroupCreate();
+  if (!wifi_initialized) {
+    wifi_event_group = xEventGroupCreate();
 
-  ESP_ERROR_CHECK(esp_netif_init());
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-  ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
-  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    wifi_initialized = true;
+  }
+
+  ap_mode = false;
+  strlcpy(ip_str, "0.0.0.0", sizeof(ip_str));
+  ip_addr_nbo = 0;
+  netmask_nbo = 0;
+  xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
   if (!try_connect_station()) {
     start_access_point();
   }
+
+  start_mdns();
+}
+
+void wifi_manager_stop(void) {
+  if (!wifi_initialized) return;
+
+  if (mdns_started) {
+    mdns_free();
+    mdns_started = false;
+  }
+
+  const esp_err_t err = esp_wifi_stop();
+  if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED) {
+    ESP_LOGW(TAG, "failed to stop Wi-Fi: %s", esp_err_to_name(err));
+  }
+  ap_mode = false;
+  strlcpy(ip_str, "0.0.0.0", sizeof(ip_str));
+  ip_addr_nbo = 0;
+  netmask_nbo = 0;
 }
 
 bool wifi_manager_is_ap_mode(void) { return ap_mode; }
 
 const char *wifi_manager_get_ip_str(void) { return ip_str; }
+
+bool wifi_manager_is_same_subnet(uint32_t peer_ip) {
+  if (peer_ip == 0 || ip_addr_nbo == 0 || netmask_nbo == 0) return false;
+
+  const uint32_t local_ip = ntohl(ip_addr_nbo);
+  const uint32_t peer = ntohl(peer_ip);
+  const uint32_t mask = ntohl(netmask_nbo);
+  return (local_ip & mask) == (peer & mask);
+}
 
 void wifi_manager_save_sta_credentials_and_reboot(const char *ssid, const char *pass) {
   nvs_handle_t handle;

@@ -29,6 +29,8 @@ static int64_t bundle_rate_started_us = 0;
 static uint32_t last_status_stream_ms = 0;
 static uint32_t last_imu_stream_ms = 0;
 static bool osc_task_initialized = false; // reset on state change
+static uint8_t send_failure_count = 0;
+#define OSC_MAX_CONSECUTIVE_SEND_FAILURES 5
 
 /* OSC strings (address pattern, type tag) are null-terminated and then
  * zero-padded so the total length is a multiple of 4 bytes. */
@@ -70,11 +72,45 @@ static bool osc_sendto_target(const uint8_t *packet, uint16_t len) {
   dest.sin_port = htons(target_port);
   dest.sin_addr.s_addr = target_ip;
 
-  int sent = sendto(osc_sock, packet, len, MSG_DONTWAIT, (struct sockaddr *)&dest, sizeof(dest));
-  if (sent < 0 && errno != EAGAIN && errno != ENOBUFS) {
-    ESP_LOGW(TAG, "sendto failed: errno=%d", errno);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    int sent = sendto(osc_sock, packet, len, MSG_DONTWAIT, (const struct sockaddr *)&dest, sizeof(dest));
+    if (sent == len) {
+      send_failure_count = 0;
+      return true;
+    }
+
+    if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS || errno == ENOMEM)) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+
+    if (sent < 0) {
+      ESP_LOGW(TAG, "sendto failed: errno=%d", errno);
+    }
+    return false;
   }
-  return sent == len;
+
+  ESP_LOGW(TAG, "sendto dropped after retries (errno=%d)", errno);
+
+  /* A target that never ARP-resolves (e.g. the registered client went away
+   * without deregistering) causes every send attempt to burn through lwIP's
+   * fixed-size pbuf pool waiting on ARP, which can starve *inbound* packet
+   * processing too (pbufs are a shared resource) - including any new
+   * /glowstick/register message that would fix this by pointing target_ip
+   * somewhere reachable. Give up on a target after repeated consecutive
+   * failures so the queue drains and new registrations can get through. The
+   * plain sendto() above (rather than connect()+send()) also means the
+   * socket is never "locked" to one peer, so it keeps accepting inbound
+   * register packets from anyone regardless of this state. */
+  if (++send_failure_count >= OSC_MAX_CONSECUTIVE_SEND_FAILURES) {
+    struct in_addr addr = {.s_addr = target_ip};
+    ESP_LOGW(TAG, "giving up on unreachable OSC target %s:%u after %u consecutive failures - "
+                  "awaiting re-registration",
+             inet_ntoa(addr), target_port, (unsigned)send_failure_count);
+    target_ip = 0;
+    send_failure_count = 0;
+  }
+  return false;
 }
 
 void osc_send_floats(const char *address, const float *values, uint8_t count) {
@@ -181,8 +217,18 @@ void osc_bundle_send(const osc_bundle_t *bundle) {
 // AI: end
 
 void osc_set_target(uint32_t ip, uint16_t port) {
+  if (!wifi_manager_is_same_subnet(ip)) {
+    struct in_addr addr = {.s_addr = ip};
+    ESP_LOGW(TAG, "ignoring OSC target %s:%u (device ip=%s on different subnet)",
+             inet_ntoa(addr), port, wifi_manager_get_ip_str());
+    target_ip = 0;
+    target_port = port;
+    return;
+  }
+
   target_ip = ip;
   target_port = port;
+  send_failure_count = 0;
 
   struct in_addr addr = {.s_addr = ip};
   ESP_LOGI(TAG, "OSC target set to %s:%u", inet_ntoa(addr), port);
@@ -236,11 +282,13 @@ void osc_tx_task(void *arg)
 {
   (void)arg;
   uint8_t buf[128];
+  bool was_osc_mode = false;
   for (;;)
   {
     if (device_state == DEVICE_STATE_OSC_SWING_MODE)
     {
       osc_init();
+      was_osc_mode = true;
       const uint32_t now = now_ms();
       // Implement transmission logic here if needed
       // stream_imu_over_osc(now, linear_acceleration_ms2); // send all instead
@@ -249,21 +297,37 @@ void osc_tx_task(void *arg)
 
       struct sockaddr_in source = {0};
       socklen_t source_len = sizeof(source);
-      int received = recvfrom(osc_sock, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&source, &source_len);
-      if (received < 0)
+      int received = recvfrom(osc_sock, buf, sizeof(buf) - 1, MSG_DONTWAIT,
+                              (struct sockaddr *)&source, &source_len);
+      if (received >= 0)
+      {
+        osc_parse_and_dispatch(buf, (uint16_t)received, source.sin_addr.s_addr, ntohs(source.sin_port));
+      }
+      else if (errno != EAGAIN && errno != EWOULDBLOCK)
       {
         ESP_LOGW(TAG, "recvfrom failed: errno=%d", errno);
-        continue;
       }
-
-      osc_parse_and_dispatch(buf, (uint16_t)received, source.sin_addr.s_addr, ntohs(source.sin_port));
     }
-    else
+    else if (was_osc_mode)
     {
       osc_task_initialized = false;
       osc_off();
+      was_osc_mode = false;
     }
-    vTaskDelay(pdMS_TO_TICKS(100));
+    /* Only stream_status_over_osc/stream_imu_over_osc's own elapsed-time
+     * checks should decide the actual send rate (down to stream_period_ms,
+     * as low as 10ms / 100Hz - see MIN_STREAM_PERIOD_MS in osc_config.c).
+     * A slow fixed delay here was silently capping every stream to at most
+     * 1000/delay Hz regardless of that config, e.g. 10Hz at a 100ms delay.
+     * IMPORTANT: CONFIG_FREERTOS_HZ=100 here means one tick = 10ms, so
+     * pdMS_TO_TICKS() truncates anything below that to 0 ticks -
+     * vTaskDelay(0) does not actually sleep, so a smaller value here just
+     * busy-spins this (priority 5) task and starves the IDLE task, tripping
+     * the task watchdog. 10ms is the fastest delay this tick rate can
+     * express, which conveniently matches the 100Hz floor above. Fall back
+     * to a slow idle poll outside OSC mode so this task isn't busy-looping
+     * for no reason. */
+    vTaskDelay(pdMS_TO_TICKS(device_state == DEVICE_STATE_OSC_SWING_MODE ? 10 : 100));
   }
 }
 
@@ -305,8 +369,7 @@ void osc_init(void)
   }
 }
 void osc_task_init(void) {
-
-  xTaskCreate(osc_rx_task, "osc_rx", 4096, NULL, 5, NULL);
+  xTaskCreate(osc_tx_task, "osc", 4096, NULL, 5, NULL);
 }
 /* Streams raw linear acceleration plus the rest of the BNO055 pose data
  * (orientation quaternion, gyro, magnetometer, gravity vector, and sensor
@@ -408,8 +471,11 @@ void stream_status_over_osc(uint32_t now) {
 
 // Turn off OSC streaming and all radio modules
 void osc_off(void){
-  // Implement logic to turn off OSC streaming and all radio modules here
-  close(osc_sock);
-  osc_sock = -1;
-  esp_err_t results = esp_wifi_stop();
+  if (osc_sock >= 0) {
+    close(osc_sock);
+    osc_sock = -1;
+  }
+  wifi_web_config_stop();
+  wifi_manager_stop();
+  target_ip = 0;
 }

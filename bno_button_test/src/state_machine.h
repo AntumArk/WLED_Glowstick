@@ -15,3 +15,9 @@ enum device_state_t {
 extern volatile enum device_state_t device_state;
 
 void next_device_state(void);
+
+/* Jumps directly to a given state (clamped to the valid range) instead of
+ * cycling one step at a time - used by the serial console so a specific
+ * mode (e.g. DEVICE_STATE_OSC_SWING_MODE) can be selected in one command
+ * without needing physical access to the button. */
+void state_machine_force(enum device_state_t state);

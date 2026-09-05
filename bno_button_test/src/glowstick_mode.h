@@ -19,5 +19,4 @@
 #define POWER_LIMIT 1.0f // keep this. crucial for battery life
 
 void glowstick_mode_init(void);
-void glowstick_mode_next_color(void);
 void glowstick_mode_charge_full(void);

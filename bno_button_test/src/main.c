@@ -13,6 +13,7 @@
 #include "glowstick_mode.h"
 #include "osc.h"
 #include "osc_config.h"
+#include "serial_console.h"
 #include "wifi_manager.h"
 #include "wifi_web_config.h"
 #include "swing_mode.h"
@@ -42,6 +43,7 @@ void app_main(void) {
   glowstick_mode_init();
   start_button_task();
   swing_mode_init();
+  start_serial_console_task();
 
   vTaskDelete(NULL);
 }

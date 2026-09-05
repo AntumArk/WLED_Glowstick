@@ -54,6 +54,14 @@ static void load_config(void) {
 
   if (err == ESP_OK && required_size == sizeof(stored)) {
     config = stored;
+    /* The registered target is deliberately NOT trusted across a reboot: the
+     * host that cares always re-sends /glowstick/register right after the
+     * device comes back up (see e.g. sensor_autoconnect in the OcS bridge),
+     * so there's no reason to keep a stale IP around - doing so just means
+     * every boot immediately tries (and fails) to stream to whatever last
+     * registered, however long ago, sometimes to a host that's no longer on
+     * the network at all. */
+    config.target_ip = 0;
     ESP_LOGI(TAG, "loaded config: port=%u stream=%d/%ums", config.target_port, config.stream_enabled,
              config.stream_period_ms);
   } else {
@@ -63,7 +71,9 @@ static void load_config(void) {
 
 /* Handles every inbound OSC message: recognized /glowstick/... config
  * addresses update+persist the config (and re-register the transport
- * target where relevant); anything else is ignored by this layer. */
+ * target where relevant); anything else is ignored by this layer. Note
+ * that /glowstick/register intentionally only updates the in-RAM target,
+ * never persisted - see load_config() above for why. */
 static void handle_osc_rx(const char *address, const int32_t *int_args, uint8_t int_arg_count,
                            const float *float_args, uint8_t float_arg_count, uint32_t sender_ip,
                            uint16_t sender_port) {
@@ -74,7 +84,6 @@ static void handle_osc_rx(const char *address, const int32_t *int_args, uint8_t 
   bool changed = false;
 
   if (strcmp(address, "/glowstick/register") == 0) {
-    changed = config.target_ip != sender_ip;
     config.target_ip = sender_ip;
     osc_set_target(config.target_ip, config.target_port);
   } else if (strcmp(address, "/glowstick/config/port") == 0 && int_arg_count >= 1 &&
@@ -103,9 +112,6 @@ static void handle_osc_rx(const char *address, const int32_t *int_args, uint8_t 
 
 void osc_config_init(void) {
   load_config();
-  if (config.target_ip != 0) {
-    osc_set_target(config.target_ip, config.target_port);
-  }
   osc_set_rx_handler(handle_osc_rx);
 }
 

@@ -9,6 +9,7 @@
 #include "wifi_manager.h"
 
 static const char *TAG = "wifi_web_config";
+static httpd_handle_t server = NULL;
 
 static const char INDEX_HTML[] =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
@@ -106,11 +107,13 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
 }
 
 void wifi_web_config_start(void) {
+  if (server != NULL) return;
+
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.stack_size = 4096;
 
-  httpd_handle_t server = NULL;
   if (httpd_start(&server, &config) != ESP_OK) {
+    server = NULL;
     ESP_LOGE(TAG, "failed to start config web server");
     return;
   }
@@ -129,4 +132,10 @@ void wifi_web_config_start(void) {
   httpd_register_uri_handler(server, &save_uri);
 
   ESP_LOGI(TAG, "config web page ready at http://%s/", wifi_manager_get_ip_str());
+}
+
+void wifi_web_config_stop(void) {
+  if (server == NULL) return;
+  httpd_stop(server);
+  server = NULL;
 }

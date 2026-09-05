@@ -8,7 +8,6 @@
 
 #include "esp_timer.h"
 
-#include "esp_log.h"
 #include "battery.h"
 #include "bno.h"
 #include "button_task.h"
@@ -27,7 +26,6 @@ typedef struct {
 	uint8_t w;
 } glow_color_t;
 
-static const char *TAG = "bno_button_test";
 TaskHandle_t glowstick_task_handle = NULL;
 
 static const glow_color_t glow_colors[] = {
@@ -39,7 +37,6 @@ static const glow_color_t glow_colors[] = {
 	{0, 0, 0, 255},
 	{255, 255, 255, 255},
 };
-uint8_t current_glow_color;
 
 static portMUX_TYPE glow_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -113,8 +110,7 @@ static void render_charge(void) {
 	color_index_snapshot = device_state;
 	taskEXIT_CRITICAL(&glow_state_lock);
 
-	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
-	if (color_index_snapshot == color_count) {
+	if (color_index_snapshot >= DEVICE_STATE_SWING_MODE) {
 		swing_mode_render(now_ms());
 		return;
 	}
@@ -156,9 +152,9 @@ static void handle_button_events(void) {
 	button_event_t event;
 	while (button_task_take_event(&event, 0)) {
 		if (event.type != BUTTON_EVENT_SHORT_PRESS) return;
+		next_device_state();
 		if(device_state<=DEVICE_STATE_GLOWSTICK_BLAST)
 		{
-			glowstick_mode_next_color();
 			glowstick_mode_charge_full();
 		} 
 	}
@@ -189,10 +185,8 @@ void glowstick_task() {
 		linear_acceleration_ms2[2] * linear_acceleration_ms2[2]);
 	float gravity_ms2[3] = {0.0f};
 	const bool have_gravity = get_current_gravity(gravity_ms2);
-	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
-
 	taskENTER_CRITICAL(&glow_state_lock);
-	if (device_state == color_count) {
+	if (device_state >= DEVICE_STATE_SWING_MODE) {
 		if (have_linear_acceleration && linear_acceleration_magnitude < SWING_PEAK_THRESHOLD_MS2) {
 			swing_armed = true;
 		}
@@ -230,19 +224,12 @@ void glowstick_mode_init(void) {
     xTaskCreatePinnedToCore((TaskFunction_t)glowstick_task, "glowstick_task", 4096, NULL, 5, &glowstick_task_handle, tskNO_AFFINITY);
 }
 
-void glowstick_mode_next_color(void) {
-	taskENTER_CRITICAL(&glow_state_lock);
-	const uint8_t color_count = (uint8_t)(sizeof(glow_colors) / sizeof(glow_colors[0]));
-	current_glow_color = (current_glow_color + 1) % color_count;
-	swing_mode_reset();
-	taskEXIT_CRITICAL(&glow_state_lock);
-	
-	render_charge();
-}
-
 void glowstick_mode_charge_full(void) {
 	taskENTER_CRITICAL(&glow_state_lock);
 	glow_charge = 1.0f;
+	for (int row = 0; row < TOTAL_ROWS; row++) {
+		row_level[row] = 1.0f;
+	}
 	taskEXIT_CRITICAL(&glow_state_lock);
 	render_charge();
 }

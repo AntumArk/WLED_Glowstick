@@ -20,6 +20,10 @@
  * or DHCP-assigned IP in STA mode). */
 void wifi_manager_init(void);
 
+/* Stops the Wi-Fi radio while retaining the initialized driver so OSC mode
+ * can start it again on a later mode cycle. */
+void wifi_manager_stop(void);
+
 /* True if the device ended up running as its own access point rather than
  * joining an existing network. */
 bool wifi_manager_is_ap_mode(void);
@@ -27,6 +31,10 @@ bool wifi_manager_is_ap_mode(void);
 /* Device's own IP address as a dotted-quad string ("192.168.4.1" in AP
  * mode, or the DHCP-assigned address in STA mode). */
 const char *wifi_manager_get_ip_str(void);
+
+/* True when peer_ip (network byte order) is on the same IPv4 subnet as the
+ * currently active STA/AP interface address. */
+bool wifi_manager_is_same_subnet(uint32_t peer_ip);
 
 /* Persists a station SSID/password to NVS (namespace "wificfg", keys
  * "ssid"/"pass") and reboots so wifi_manager_init() re-attempts a station
