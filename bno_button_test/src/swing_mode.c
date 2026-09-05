@@ -4,6 +4,10 @@
 #include <stdint.h>
 
 #include "led_output.h"
+#include "zinc_time.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "state_machine.h"
 
 #define PEAK_FLASH_FADE_IN_MS 100U
 #define PEAK_FLASH_FADE_OUT_MS 500U
@@ -14,6 +18,27 @@ static uint32_t random_state = 0x6D2B79F5U;
 static uint8_t flash_red = 0;
 static uint8_t flash_green = 0;
 static uint8_t flash_blue = 0;
+
+TaskHandle_t swing_mode_task_handle = NULL;
+
+
+void swing_mode_task(void) {
+  while (true) {
+    if (device_state == DEVICE_STATE_SWING_MODE)
+    {
+      const uint32_t now = now_ms();
+      swing_mode_handle_peak(now);
+      swing_mode_render(now);
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+void swing_mode_init(void) {
+  swing_mode_reset();
+  xTaskCreatePinnedToCore((TaskFunction_t)swing_mode_task, "swing_mode_task", 4096, NULL, 5, &swing_mode_task_handle, tskNO_AFFINITY);
+}
 
 static uint32_t next_random(void) {
   random_state ^= random_state << 13;

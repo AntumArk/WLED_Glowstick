@@ -28,6 +28,7 @@
 #define OSC_LISTEN_PORT 9000
 #define OSC_DEFAULT_SEND_PORT 9001
 #define OSC_BUNDLE_CAPACITY 384
+#define STATUS_STREAM_PERIOD_MS 2000U
 
 typedef struct {
     uint8_t data[OSC_BUNDLE_CAPACITY];
@@ -44,7 +45,7 @@ typedef void (*osc_rx_cb_t)(const char *address, const int32_t *int_args, uint8_
 
 /* Starts the UDP socket, the receive task, and registers a low-level
  * dispatcher; osc_set_rx_handler() below is what higher layers use. */
-void osc_init(void);
+void osc_task_init(void);
 
 void osc_set_rx_handler(osc_rx_cb_t cb);
 
@@ -77,3 +78,10 @@ void osc_bundle_send(const osc_bundle_t *bundle);
  * /glowstick/config/port message arrives. */
 void osc_set_target(uint32_t ip, uint16_t port);
 bool osc_has_target(void);
+void stream_status_over_osc(uint32_t now);
+void osc_tx_task(void *arg);
+void osc_parse_and_dispatch(const uint8_t *buf, uint16_t len, uint32_t sender_ip, uint16_t sender_port);
+void stream_imu_over_osc(uint32_t now);
+// Initiates wifi connections
+void osc_init(void);
+void osc_off(void);

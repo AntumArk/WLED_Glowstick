@@ -15,10 +15,9 @@
 #include "osc_config.h"
 #include "wifi_manager.h"
 #include "wifi_web_config.h"
+#include "swing_mode.h"
 
 static const char *TAG = "bno_button_test";
-
-
 
 void app_main(void) {
   ESP_LOGI(TAG, "=== BNO055 + Button + Battery + SK6812 Test ===");
@@ -37,16 +36,12 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(nvs_err);
 
-  wifi_manager_init();
-  osc_init();
-  osc_config_init();
-  if (wifi_manager_is_ap_mode()) {
-    wifi_web_config_start();
-  }
+  osc_task_init();
 
   start_battery_task();
   glowstick_mode_init();
   start_button_task();
+  swing_mode_init();
 
   vTaskDelete(NULL);
 }

@@ -9,6 +9,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "esp_sleep.h"
+#include "state_machine.h"
+#include "bno.h"
+#include "led_output.h"
 
 #define BUTTON_GPIO GPIO_NUM_0
 #define BUTTON_LONG_PRESS_MS 3000
@@ -99,8 +103,11 @@ static void button_task(void *arg) {
         } else {
           if (button_long_press_armed) {
             publish_button_event(BUTTON_EVENT_LONG_PRESS_RELEASE, now);
+            blink_sleep_ready();
+            enter_deep_sleep();
           } else if (button_press_start_ms != 0 &&
               (now - button_press_start_ms) < BUTTON_LONG_PRESS_MS) {
+            next_device_state(); // STATE SWITCHES HERE
             publish_button_event(BUTTON_EVENT_SHORT_PRESS, now);
           }
           button_press_start_ms = 0;
@@ -139,4 +146,42 @@ void start_button_task(void) {
 bool button_task_take_event(button_event_t *event, TickType_t wait_ticks) {
   if (event == NULL || button_action_queue == NULL) return false;
   return xQueueReceive(button_action_queue, event, wait_ticks) == pdTRUE;
+}
+
+void enter_deep_sleep(void) {
+	ESP_LOGI(TAG, "Long press detected -> entering deep sleep. Press button to wake.");
+	bno_set_sleeping(true);
+	if (bno_ready) {
+		(void)bno_suspend();
+	}
+	led_output_set_all_rgbw(0, 0, 0, 0);
+
+	ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+	ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(1ULL << BUTTON_WAKE_GPIO, ESP_EXT1_WAKEUP_ANY_HIGH));
+
+	gpio_reset_pin(I2C_SDA_GPIO);
+	gpio_reset_pin(I2C_SCL_GPIO);
+	gpio_set_direction(I2C_SDA_GPIO, GPIO_MODE_INPUT);
+	gpio_set_direction(I2C_SCL_GPIO, GPIO_MODE_INPUT);
+	gpio_pullup_dis(I2C_SDA_GPIO);
+	gpio_pullup_dis(I2C_SCL_GPIO);
+	gpio_pulldown_dis(I2C_SDA_GPIO);
+	gpio_pulldown_dis(I2C_SCL_GPIO);
+
+	gpio_reset_pin(GPIO_NUM_1);
+	gpio_set_direction(GPIO_NUM_1, GPIO_MODE_INPUT);
+	gpio_pullup_dis(GPIO_NUM_1);
+	gpio_pulldown_dis(GPIO_NUM_1);
+
+	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
+	esp_deep_sleep_start();
+}
+
+void blink_sleep_ready(void) {
+	for (int i = 0; i < 2; i++) {
+		led_output_set_all_rgbw(0, 0, 0, 255);
+		vTaskDelay(pdMS_TO_TICKS(80));
+		led_output_set_all_rgbw(0, 0, 0, 0);
+		vTaskDelay(pdMS_TO_TICKS(70));
+	}
 }

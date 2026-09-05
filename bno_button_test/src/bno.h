@@ -64,3 +64,4 @@ typedef struct bno_readings_t {
 } bno_readings_t;
 
 extern bno_readings_t last_bno_teleplot;
+bool get_current_linear_acceleration(float linear_acceleration_ms2[3]);

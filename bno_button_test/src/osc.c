@@ -8,6 +8,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
+#include "bno.h"
+#include "osc_config.h"
+#include "led_output.h"
+#include "battery.h"
+#include "zinc_time.h"
+#include "wifi_manager.h"
+#include "wifi_web_config.h"
+#include "esp_wifi.h"
+#include "state_machine.h"
 
 static const char *TAG = "osc";
 
@@ -17,6 +26,9 @@ static uint16_t target_port = OSC_DEFAULT_SEND_PORT;
 static osc_rx_cb_t rx_handler = NULL;
 static uint32_t bundle_rate_count = 0;
 static int64_t bundle_rate_started_us = 0;
+static uint32_t last_status_stream_ms = 0;
+static uint32_t last_imu_stream_ms = 0;
+static bool osc_task_initialized = false; // reset on state change
 
 /* OSC strings (address pattern, type tag) are null-terminated and then
  * zero-padded so the total length is a multiple of 4 bytes. */
@@ -183,7 +195,7 @@ bool osc_has_target(void) { return target_ip != 0; }
  * character stops parsing further arguments (rare in practice for a simple
  * control device like this), since we have no use for blobs/strings/etc.
  * here. */
-static void osc_parse_and_dispatch(const uint8_t *buf, uint16_t len, uint32_t sender_ip, uint16_t sender_port) {
+void osc_parse_and_dispatch(const uint8_t *buf, uint16_t len, uint32_t sender_ip, uint16_t sender_port) {
   if (len < 4 || buf[0] != '/') return; /* not an OSC message (bundles start with '#') */
 
   const char *address = (const char *)buf;
@@ -220,45 +232,184 @@ static void osc_parse_and_dispatch(const uint8_t *buf, uint16_t len, uint32_t se
   if (rx_handler) rx_handler(address, int_args, int_count, float_args, float_count, sender_ip, sender_port);
 }
 
-static void osc_rx_task(void *arg) {
+void osc_tx_task(void *arg)
+{
   (void)arg;
   uint8_t buf[128];
+  for (;;)
+  {
+    if (device_state == DEVICE_STATE_OSC_SWING_MODE)
+    {
+      osc_init();
+      const uint32_t now = now_ms();
+      // Implement transmission logic here if needed
+      // stream_imu_over_osc(now, linear_acceleration_ms2); // send all instead
+      stream_status_over_osc(now);
+      stream_imu_over_osc(now);
 
-  for (;;) {
-    struct sockaddr_in source = {0};
-    socklen_t source_len = sizeof(source);
-    int received = recvfrom(osc_sock, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&source, &source_len);
-    if (received < 0) {
-      ESP_LOGW(TAG, "recvfrom failed: errno=%d", errno);
-      vTaskDelay(pdMS_TO_TICKS(100));
-      continue;
+      struct sockaddr_in source = {0};
+      socklen_t source_len = sizeof(source);
+      int received = recvfrom(osc_sock, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&source, &source_len);
+      if (received < 0)
+      {
+        ESP_LOGW(TAG, "recvfrom failed: errno=%d", errno);
+        continue;
+      }
+
+      osc_parse_and_dispatch(buf, (uint16_t)received, source.sin_addr.s_addr, ntohs(source.sin_port));
     }
-
-    osc_parse_and_dispatch(buf, (uint16_t)received, source.sin_addr.s_addr, ntohs(source.sin_port));
+    else
+    {
+      osc_task_initialized = false;
+      osc_off();
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
 void osc_set_rx_handler(osc_rx_cb_t cb) { rx_handler = cb; }
 
-void osc_init(void) {
-  osc_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-  if (osc_sock < 0) {
-    ESP_LOGE(TAG, "failed to create UDP socket: errno=%d", errno);
-    return;
+void osc_init(void)
+{
+  if (!osc_task_initialized)
+  {
+    wifi_manager_init();
+    osc_config_init();
+    if (wifi_manager_is_ap_mode())
+    {
+      wifi_web_config_start();
+    }
+
+    osc_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (osc_sock < 0)
+    {
+      ESP_LOGE(TAG, "failed to create UDP socket: errno=%d", errno);
+      return;
+    }
+
+    struct sockaddr_in bind_addr = {0};
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = htons(OSC_LISTEN_PORT);
+
+    if (bind(osc_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0)
+    {
+      ESP_LOGE(TAG, "failed to bind UDP socket to port %d: errno=%d", OSC_LISTEN_PORT, errno);
+      close(osc_sock);
+      osc_sock = -1;
+      return;
+    }
+
+    ESP_LOGI(TAG, "listening for OSC on UDP port %d", OSC_LISTEN_PORT);
+    osc_task_initialized = true;
   }
+}
+void osc_task_init(void) {
 
-  struct sockaddr_in bind_addr = {0};
-  bind_addr.sin_family = AF_INET;
-  bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  bind_addr.sin_port = htons(OSC_LISTEN_PORT);
-
-  if (bind(osc_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
-    ESP_LOGE(TAG, "failed to bind UDP socket to port %d: errno=%d", OSC_LISTEN_PORT, errno);
-    close(osc_sock);
-    osc_sock = -1;
-    return;
-  }
-
-  ESP_LOGI(TAG, "listening for OSC on UDP port %d", OSC_LISTEN_PORT);
   xTaskCreate(osc_rx_task, "osc_rx", 4096, NULL, 5, NULL);
+}
+/* Streams raw linear acceleration plus the rest of the BNO055 pose data
+ * (orientation quaternion, gyro, magnetometer, gravity vector, and sensor
+ * calibration status) as OSC messages, gated by the live
+ * (OSC-configurable) enable flag and rate limit - see osc_config.h for
+ * the full list of addresses/argument layouts. */
+void stream_imu_over_osc(uint32_t now) {
+  const osc_config_t *cfg = osc_config_get();
+  if (!cfg->stream_enabled) return;
+  if ((now - last_imu_stream_ms) < cfg->stream_period_ms) return;
+  last_imu_stream_ms = now;
+  if (!osc_has_target()) return;
+
+  osc_bundle_t bundle;
+  osc_bundle_init(&bundle);
+  if (!osc_bundle_add_floats(&bundle, "/glowstick/accel", (const float[]){(float)last_bno_teleplot.linacc[0] / 100.0f,
+                                                                 (float)last_bno_teleplot.linacc[1] / 100.0f,
+                                                                 (float)last_bno_teleplot.linacc[2] / 100.0f}, 3)) return;
+
+  const float quat[4] = {
+      (float)last_bno_teleplot.quat[0] / 16384.0f,
+      (float)last_bno_teleplot.quat[1] / 16384.0f,
+      (float)last_bno_teleplot.quat[2] / 16384.0f,
+      (float)last_bno_teleplot.quat[3] / 16384.0f,
+  };
+  if (!osc_bundle_add_floats(&bundle, "/glowstick/orientation", quat, 4)) return;
+
+  const float gyro[3] = {
+      (float)last_bno_teleplot.gyro[0] / 16.0f,
+      (float)last_bno_teleplot.gyro[1] / 16.0f,
+      (float)last_bno_teleplot.gyro[2] / 16.0f,
+  };
+  if (!osc_bundle_add_floats(&bundle, "/glowstick/gyro", gyro, 3)) return;
+
+  const float mag[3] = {
+      (float)last_bno_teleplot.mag[0] / 16.0f,
+      (float)last_bno_teleplot.mag[1] / 16.0f,
+      (float)last_bno_teleplot.mag[2] / 16.0f,
+  };
+  if (!osc_bundle_add_floats(&bundle, "/glowstick/mag", mag, 3)) return;
+
+  const float gravity[3] = {
+      (float)last_bno_teleplot.gravity[0] / 100.0f,
+      (float)last_bno_teleplot.gravity[1] / 100.0f,
+      (float)last_bno_teleplot.gravity[2] / 100.0f,
+  };
+  if (!osc_bundle_add_floats(&bundle, "/glowstick/gravity", gravity, 3)) return;
+
+  const int32_t calib[4] = {
+      (last_bno_teleplot.calib >> 6) & 0x03, /* system */
+      (last_bno_teleplot.calib >> 4) & 0x03, /* gyro */
+      (last_bno_teleplot.calib >> 2) & 0x03, /* accel */
+      last_bno_teleplot.calib & 0x03,        /* mag */
+  };
+  if (!osc_bundle_add_ints(&bundle, "/glowstick/calib", calib, 4)) return;
+
+	const int32_t ndof[3] = {
+			last_bno_teleplot.op_mode,
+			last_bno_teleplot.sys_status,
+			last_bno_teleplot.sys_error,
+	};
+	if (!osc_bundle_add_ints(&bundle, "/glowstick/ndof", ndof, 3)) return;
+	osc_bundle_send(&bundle);
+}
+
+/* Streams device housekeeping data (battery, BNO055 die temperature,
+ * Wi-Fi RSSI) at a fixed slow rate, independent of the IMU stream
+ * enable/period settings - this is cheap and useful to have on hand for
+ * any receiver UI even without a full accel stream running. */
+void stream_status_over_osc(uint32_t now) {
+  if ((now - last_status_stream_ms) < STATUS_STREAM_PERIOD_MS) return;
+  last_status_stream_ms = now;
+  if (!osc_has_target()) return;
+
+  osc_send_floats("/glowstick/battery", (const float[]){battery_get_voltage(), battery_get_percent()}, 2);
+  osc_send_float1("/glowstick/temp", (float)last_bno_teleplot.temp_c);
+  const int32_t rssi = wifi_manager_get_rssi();
+  osc_send_ints("/glowstick/rssi", &rssi, 1);
+  /* Power-on self-test result (set once at boot, resent here so it's
+   * visible without a serial connection): bit0=MCU bit1=gyro bit2=accel
+   * bit3=mag, 1=pass. If bit3 (mag) is 0, the board's magnetometer
+   * hardware failed self-test and /glowstick/mag will always read zero
+   * regardless of firmware - a common issue on some BNO055 clone modules. */
+  const int32_t selftest[4] = {
+      last_bno_teleplot.selftest & 0x01,
+      (last_bno_teleplot.selftest >> 1) & 0x01,
+      (last_bno_teleplot.selftest >> 2) & 0x01,
+      (last_bno_teleplot.selftest >> 3) & 0x01,
+  };
+  osc_send_ints("/glowstick/selftest", selftest, 4);
+
+	const float mag_probe[3] = {
+			(float)last_bno_teleplot.mag_probe[0] / 16.0f,
+			(float)last_bno_teleplot.mag_probe[1] / 16.0f,
+			(float)last_bno_teleplot.mag_probe[2] / 16.0f,
+	};
+	osc_send_floats("/glowstick/magprobe", mag_probe, 3);
+}
+
+// Turn off OSC streaming and all radio modules
+void osc_off(void){
+  // Implement logic to turn off OSC streaming and all radio modules here
+  close(osc_sock);
+  osc_sock = -1;
+  esp_err_t results = esp_wifi_stop();
 }

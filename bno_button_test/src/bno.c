@@ -328,4 +328,12 @@ bool init_bno(void) {
   return initGood;
 }
 
+bool get_current_linear_acceleration(float linear_acceleration_ms2[3]) {
+	if (!bno_ready) return false;
+
+	linear_acceleration_ms2[0] = (float)last_bno_teleplot.linacc[0] / 100.0f;
+	linear_acceleration_ms2[1] = (float)last_bno_teleplot.linacc[1] / 100.0f;
+	linear_acceleration_ms2[2] = (float)last_bno_teleplot.linacc[2] / 100.0f;
+	return true;
+}
 
