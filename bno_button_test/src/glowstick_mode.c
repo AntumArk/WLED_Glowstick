@@ -211,9 +211,11 @@ void glowstick_mode_init(void) {
 	last_swing_peak_ms = 0;
 	swing_armed = true;
 	smoothed_settle = 0.5f;
-	glow_charge = 0.0f;
+	// Start fully charged so the very first mode after power-on/wake is at
+	// full brightness immediately, instead of dark until the user shakes it.
+	glow_charge = 1.0f;
 	for (int row = 0; row < TOTAL_ROWS; row++) {
-		row_level[row] = 0.0f;
+		row_level[row] = 1.0f;
 	}
 	swing_mode_reset();
 	device_state = 0;

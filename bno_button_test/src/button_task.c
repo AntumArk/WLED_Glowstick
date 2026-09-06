@@ -138,7 +138,14 @@ void start_button_task(void) {
   }
   ESP_ERROR_CHECK(gpio_isr_handler_add(BUTTON_GPIO, button_isr_handler, NULL));
 
-  xTaskCreatePinnedToCore(button_task, "button_task", 2048, NULL, 4, &button_task_handle, tskNO_AFFINITY);
+  // Highest priority in the app: a held button must be able to preempt the
+  // IMU/OSC/LED tasks (all priority 5) so long-press-to-sleep and mode
+  // cycling stay responsive even while they're busy. Those tasks were
+  // starving this one at its old priority 4 (always losing to priority-5
+  // tasks), which looked like the button "stopped working" - device_state
+  // never advanced and deep sleep was never entered, while sensor-driven
+  // LED rendering kept running fine (it doesn't depend on button_task).
+  xTaskCreatePinnedToCore(button_task, "button_task", 2048, NULL, 10, &button_task_handle, tskNO_AFFINITY);
 }
 
 bool button_task_take_event(button_event_t *event, TickType_t wait_ticks) {
@@ -177,7 +184,7 @@ void enter_deep_sleep(void) {
 
 void blink_sleep_ready(void) {
 	for (int i = 0; i < 2; i++) {
-		led_output_set_all_rgbw(0, 0, 0, 255);
+		led_output_set_all_rgbw(0, 0, 255, 0); // blue: use the B channel, not W (W drives the pure-white diode)
 		vTaskDelay(pdMS_TO_TICKS(80));
 		led_output_set_all_rgbw(0, 0, 0, 0);
 		vTaskDelay(pdMS_TO_TICKS(70));
