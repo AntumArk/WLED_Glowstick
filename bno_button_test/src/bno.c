@@ -1,6 +1,8 @@
 #include "bno.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -276,10 +278,62 @@ bool try_init_bno_on_addr(uint8_t addr) {
   return true;
 }
 
+/* Bit-bangs the standard I2C bus-recovery sequence (up to 9 manual SCL
+ * clocks, then a STOP condition) before the hardware I2C driver ever takes
+ * ownership of the pins. This guards against a wedged bus where the
+ * BNO055 is left holding SDA low mid-byte - which is exactly what happens
+ * if a transaction gets abruptly cut off by esp_deep_sleep_start() (see
+ * button_task.c's enter_deep_sleep()) firing while bno_task had an
+ * in-flight I2C read: the ESP32 reboots on wake, but the BNO055 itself
+ * stays powered and still thinks it's mid-transfer, so it never releases
+ * SDA. Without this, every I2C transaction after such a reboot fails
+ * forever ("BNO055 read failed at 0x29" on every single sample) until the
+ * BNO055 itself loses power, which doesn't happen on this board. A clean
+ * bus (SDA already high) makes this a harmless no-op. */
+static void i2c_bus_recover(void) {
+  const gpio_config_t io_conf = {
+      .pin_bit_mask = (1ULL << I2C_SCL_GPIO) | (1ULL << I2C_SDA_GPIO),
+      .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+      .pull_up_en = GPIO_PULLUP_ENABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_DISABLE,
+  };
+  gpio_config(&io_conf);
+
+  gpio_set_level(I2C_SCL_GPIO, 1);
+  gpio_set_level(I2C_SDA_GPIO, 1);
+  esp_rom_delay_us(5);
+
+  if (gpio_get_level(I2C_SDA_GPIO) == 1) {
+    return; // bus already idle, nothing stuck
+  }
+
+  ESP_LOGW(TAG, "I2C bus looks wedged (SDA held low at boot) - recovering");
+  for (int i = 0; i < 9 && gpio_get_level(I2C_SDA_GPIO) == 0; i++) {
+    gpio_set_level(I2C_SCL_GPIO, 0);
+    esp_rom_delay_us(5);
+    gpio_set_level(I2C_SCL_GPIO, 1);
+    esp_rom_delay_us(5);
+  }
+
+  // STOP condition: SDA rises while SCL is held high.
+  gpio_set_level(I2C_SDA_GPIO, 0);
+  esp_rom_delay_us(5);
+  gpio_set_level(I2C_SCL_GPIO, 1);
+  esp_rom_delay_us(5);
+  gpio_set_level(I2C_SDA_GPIO, 1);
+  esp_rom_delay_us(5);
+
+  ESP_LOGI(TAG, "I2C bus recovery finished (SDA now %s)",
+           gpio_get_level(I2C_SDA_GPIO) ? "released" : "STILL STUCK LOW");
+}
+
 void init_i2c(void) {
   if (i2c_bus != NULL) {
     return;
   }
+
+  i2c_bus_recover();
 
   const i2c_master_bus_config_t config = {
       .clk_source = I2C_CLK_SRC_DEFAULT,

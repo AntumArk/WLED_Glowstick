@@ -156,6 +156,19 @@ bool button_task_take_event(button_event_t *event, TickType_t wait_ticks) {
 void enter_deep_sleep(void) {
 	ESP_LOGI(TAG, "Long press detected -> entering deep sleep. Press button to wake.");
 	bno_set_sleeping(true);
+	// bno_task only checks the sleeping flag at the top of its loop, so it
+	// may still be mid-transaction (an I2C read burst, up to its 100ms
+	// per-call timeout) on a different task right when we set that flag.
+	// Racing bno_suspend()'s own I2C writes against that in-flight read -
+	// or worse, cutting the read off mid-byte via esp_deep_sleep_start()
+	// below - can leave the BNO055 holding the bus (SDA stuck low), which
+	// then fails every I2C transaction after the next reboot until power
+	// is fully removed from the sensor (see i2c_bus_recover() in bno.c,
+	// added as a belt-and-suspenders fix for exactly that case). Waiting
+	// out one full sample period plus the worst-case transaction timeout
+	// here guarantees bno_task has actually parked itself in its paused
+	// branch before we touch the bus again or power down.
+	vTaskDelay(pdMS_TO_TICKS(BNO_SAMPLE_PERIOD_MS + 120));
 	if (bno_ready) {
 		(void)bno_suspend();
 	}
