@@ -389,6 +389,22 @@ void stream_imu_over_osc(uint32_t now) {
                                                                  (float)last_bno_teleplot.linacc[1] / 100.0f,
                                                                  (float)last_bno_teleplot.linacc[2] / 100.0f}, 3)) return;
 
+  // gyro is sent *before* orientation (not the read/register order) so that
+  // consumers processing this bundle's messages in arrival order - e.g. the
+  // room-editor's jump-rejection heuristic, which sanity-checks each new
+  // orientation sample against how fast the device is currently spinning -
+  // see the freshest gyro reading for this same instant, not the previous
+  // bundle's. With orientation first, that heuristic under-read the current
+  // angular velocity by one whole sample period, which could reject a
+  // legitimate fast-twist update and made orientation visibly freeze
+  // ("hang") during quick motions.
+  const float gyro[3] = {
+      (float)last_bno_teleplot.gyro[0] / 16.0f,
+      (float)last_bno_teleplot.gyro[1] / 16.0f,
+      (float)last_bno_teleplot.gyro[2] / 16.0f,
+  };
+  if (!osc_bundle_add_floats(&bundle, "/glowstick/gyro", gyro, 3)) return;
+
   const float quat[4] = {
       (float)last_bno_teleplot.quat[0] / 16384.0f,
       (float)last_bno_teleplot.quat[1] / 16384.0f,
@@ -396,13 +412,6 @@ void stream_imu_over_osc(uint32_t now) {
       (float)last_bno_teleplot.quat[3] / 16384.0f,
   };
   if (!osc_bundle_add_floats(&bundle, "/glowstick/orientation", quat, 4)) return;
-
-  const float gyro[3] = {
-      (float)last_bno_teleplot.gyro[0] / 16.0f,
-      (float)last_bno_teleplot.gyro[1] / 16.0f,
-      (float)last_bno_teleplot.gyro[2] / 16.0f,
-  };
-  if (!osc_bundle_add_floats(&bundle, "/glowstick/gyro", gyro, 3)) return;
 
   const float mag[3] = {
       (float)last_bno_teleplot.mag[0] / 16.0f,
